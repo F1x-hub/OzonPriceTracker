@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>Ozon Price Tracker</title>
+    <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+    <div class="tabs">
+        <button class="tab-btn active" data-tab="tracking-tab">Отслеживание</button>
+        <button class="tab-btn" data-tab="history-tab">История</button>
+    </div>
+
+    <div class="container tab-content active" id="tracking-tab">
+        <h2>Мониторинг цен Ozon</h2>
+        
+        <div class="form-group">
+            <input type="url" id="productUrl" placeholder="https://www.ozon.ru/product/..." required>
+        </div>
+        
+        <div class="form-group">
+            <input type="number" id="targetPrice" placeholder="Целевая цена в рублях" min="1" required>
+        </div>
+        
+        <div class="radio-group">
+            <label>
+                <input type="radio" name="priceType" value="bank" checked>
+                С Ozon Банком
+            </label>
+            <label>
+                <input type="radio" name="priceType" value="nobank">
+                Без Ozon Банка
+            </label>
+        </div>
+        
+        <button id="addBtn">Добавить отслеживание</button>
+        <div id="statusMessage" class="status-hidden"></div>
+
+        <div class="settings-group" style="margin-top: 15px; padding-top: 10px; border-top: 1px solid #eee;">
+            <label for="checkInterval" style="font-size: 13px; color: #555; display:block; margin-bottom: 5px;">Интервал проверки (минут):</label>
+            <div style="display: flex; gap: 8px;">
+                <input type="number" id="checkInterval" min="1" value="120" style="width: 80px; box-sizing: border-box;">
+                <button id="saveIntervalBtn" style="padding: 8px 10px; font-size: 13px; flex-grow: 1;">Сохранить интервал</button>
+            </div>
+        </div>
+
+        <div class="tracked-items-header">
+            <h3>Отслеживаемые товары</h3>
+        </div>
+        <div id="trackedItemsList">
+            <!-- Items will be injected here by popup.js -->
+        </div>
+
+        <div class="footer">
+            <span id="lastCheckTime">Последняя проверка: никогда</span>
+        </div>
+    </div>
+
+    <div class="container tab-content" id="history-tab">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+            <h2 style="margin: 0;">История уведомлений</h2>
+        </div>
+
+        <div style="display: flex; gap: 8px; margin-bottom: 15px;">
+            <button id="showAllHistoryBtn" style="flex-grow: 1; display: none;">Показать все</button>
+            <button id="clearHistoryBtn" style="background-color: #dc3545; flex-grow: 1;">Очистить историю</button>
+        </div>
+
+        <div id="historyList">
+            <!-- History items will be injected here -->
+        </div>
+    </div>
+
+    <script src="popup.js"></script>
+</body>
+</html>

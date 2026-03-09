@@ -1,0 +1,22 @@
+{
+  "manifest_version": 3,
+  "name": "Ozon Price Tracker",
+  "version": "1.0",
+  "description": "Мониторинг цен на товары Ozon.ru",
+  "permissions": [
+    "storage",
+    "alarms",
+    "notifications",
+    "tabs",
+    "scripting"
+  ],
+  "host_permissions": [
+    "https://www.ozon.ru/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html"
+  }
+}
