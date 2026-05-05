@@ -12,7 +12,14 @@ document.addEventListener('DOMContentLoaded', () => {
     const wbArticlesInput = document.getElementById('wbArticles');
     const wbStartBtn = document.getElementById('wbStartBtn');
     const wbExportBtn = document.getElementById('wbExportBtn');
+    const wbClearBtn = document.getElementById('wbClearBtn');
     const wbTrackedItemsList = document.getElementById('wbTrackedItemsList');
+    
+    // Progress Bar elements
+    const wbProgressContainer = document.getElementById('wbProgressContainer');
+    const wbProgressText = document.getElementById('wbProgressText');
+    const wbProgressPercent = document.getElementById('wbProgressPercent');
+    const wbProgressBar = document.getElementById('wbProgressBar');
 
     // Excel Export Logic
     wbExportBtn.addEventListener('click', () => {
@@ -46,6 +53,19 @@ document.addEventListener('DOMContentLoaded', () => {
         const fileName = `wb_prices_${date}.xlsx`;
         
         XLSX.writeFile(wb, fileName);
+    });
+
+    // Clear WB Logic
+    wbClearBtn.addEventListener('click', () => {
+        if (confirm('Очистить результаты Wildberries?')) {
+            chrome.storage.local.set({ 
+                wbLastResults: {}, 
+                wbStatus: { total: 0, done: 0, running: false } 
+            }, () => {
+                renderWbResults({});
+                updateWbProgress({ total: 0, done: 0, running: false });
+            });
+        }
     });
 
     // History elements
@@ -89,10 +109,11 @@ document.addEventListener('DOMContentLoaded', () => {
         loadHistory();
     });
 
-    // Load Ozon items on startup
+    // Initial load
     loadItems();
     updateLastCheckTime();
     loadInterval();
+    loadWbState();
 
     saveIntervalBtn.addEventListener('click', () => {
         const newInterval = parseInt(checkIntervalInput.value, 10);
@@ -234,7 +255,6 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // --- Wildberries Price Viewer Logic ---
-    loadWbResults();
 
     wbStartBtn.addEventListener('click', async () => {
         const text = wbArticlesInput.value.trim();
@@ -243,81 +263,62 @@ document.addEventListener('DOMContentLoaded', () => {
         const articles = parseArticles(text);
         if (articles.length === 0) return;
 
-        // Clear previous results from storage and DOM
-        chrome.storage.local.set({ wbLastResults: {} });
+        // Disable start button and start background process
+        wbStartBtn.disabled = true;
+        wbStartBtn.textContent = 'Обработка...';
+
+        chrome.runtime.sendMessage({ action: 'fetchWbPrices', articles }, (response) => {
+            console.log("Background fetch started:", response);
+        });
+    });
+
+    function loadWbState() {
+        chrome.storage.local.get({ wbLastResults: {}, wbStatus: { total: 0, done: 0, running: false } }, (result) => {
+            renderWbResults(result.wbLastResults);
+            updateWbProgress(result.wbStatus);
+        });
+    }
+
+    function renderWbResults(results) {
         wbTrackedItemsList.innerHTML = '';
-        
-        articles.forEach(id => {
+        if (!results || Object.keys(results).length === 0) return;
+
+        for (const [id, data] of Object.entries(results)) {
             const row = document.createElement('div');
             row.className = 'wb-item';
             row.id = `wb-row-${id}`;
+            const walletStr = data.wallet != null ? data.wallet.toLocaleString('ru-RU') + ' ₽' : '—';
+            const totalStr = data.total != null ? data.total.toLocaleString('ru-RU') + ' ₽' : '—';
             row.innerHTML = `
                 <span class="wb-article">${id}</span>
-                <span class="wb-wallet-price">загрузка...</span>
-                <span class="wb-regular-price">загрузка...</span>
+                <span class="wb-wallet-price">${walletStr}</span>
+                <span class="wb-regular-price">${totalStr}</span>
             `;
             wbTrackedItemsList.appendChild(row);
-        });
+        }
+    }
 
-        // 2. Message to background to fetch via DOM
-        chrome.runtime.sendMessage(
-            { action: 'fetchWbPrices', articles },
-            (results) => {
-                if (chrome.runtime.lastError) {
-                    console.error("Runtime error:", chrome.runtime.lastError);
-                    articles.forEach(id => updateWbRow(id, null, null));
-                    return;
-                }
-                
-                // Save results to storage
-                chrome.storage.local.set({ wbLastResults: results });
-
-                for (const [id, data] of Object.entries(results)) {
-                    updateWbRow(id, data.wallet, data.total);
-                }
-            }
-        );
-    });
-
-    function loadWbResults() {
-        chrome.storage.local.get({ wbLastResults: {} }, (result) => {
-            const results = result.wbLastResults;
-            if (Object.keys(results).length > 0) {
-                wbTrackedItemsList.innerHTML = '';
-                for (const [id, data] of Object.entries(results)) {
-                    const row = document.createElement('div');
-                    row.className = 'wb-item';
-                    row.id = `wb-row-${id}`;
-                    const walletStr = data.wallet != null ? data.wallet.toLocaleString('ru-RU') + ' ₽' : '—';
-                    const totalStr = data.total != null ? data.total.toLocaleString('ru-RU') + ' ₽' : '—';
-                    row.innerHTML = `
-                        <span class="wb-article">${id}</span>
-                        <span class="wb-wallet-price">${walletStr}</span>
-                        <span class="wb-regular-price">${totalStr}</span>
-                    `;
-                    wbTrackedItemsList.appendChild(row);
-                }
-            }
-        });
+    function updateWbProgress(status) {
+        if (status.running) {
+            wbProgressContainer.style.display = 'block';
+            wbProgressText.textContent = `Обработано: ${status.done} из ${status.total}`;
+            const percent = Math.round((status.done / status.total) * 100);
+            wbProgressPercent.textContent = `${percent}%`;
+            wbProgressBar.style.width = `${percent}%`;
+            
+            wbStartBtn.disabled = true;
+            wbStartBtn.textContent = 'Обработка...';
+        } else {
+            wbProgressContainer.style.display = 'none';
+            wbStartBtn.disabled = false;
+            wbStartBtn.textContent = 'Старт';
+        }
     }
 
     function parseArticles(text) {
         return text.split('\n')
                    .map(s => s.trim())
                    .filter(s => /^\d+$/.test(s));
-    }
-
-    function updateWbRow(id, wallet, regular) {
-        const row = document.getElementById(`wb-row-${id}`);
-        if (!row) return;
-
-        const walletSpan = row.querySelector('.wb-wallet-price');
-        const regularSpan = row.querySelector('.wb-regular-price');
-
-        const format = (val) => val != null ? val.toLocaleString('ru-RU') + ' ₽' : '—';
-
-        walletSpan.textContent = format(wallet);
-        regularSpan.textContent = format(regular);
     }
 
     // --- History Logic ---
@@ -382,6 +383,12 @@ document.addEventListener('DOMContentLoaded', () => {
             if (changes.lastCheckTimestamp) {
                 const date = new Date(changes.lastCheckTimestamp.newValue);
                 lastCheckTimeSpan.textContent = `Последняя проверка: ${date.toLocaleString('ru-RU')}`;
+            }
+            if (changes.wbLastResults) {
+                renderWbResults(changes.wbLastResults.newValue);
+            }
+            if (changes.wbStatus) {
+                updateWbProgress(changes.wbStatus.newValue);
             }
         }
     });

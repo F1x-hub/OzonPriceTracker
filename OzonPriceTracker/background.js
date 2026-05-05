@@ -32,8 +32,10 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         checkPrices();
         sendResponse({status: "started"});
     } else if (request.action === 'fetchWbPrices') {
-        fetchAll(request.articles).then(sendResponse);
-        return true;
+        // Start background processing
+        startWbBackgroundFetch(request.articles);
+        sendResponse({status: "started"});
+        return false; // Sync response, processing continues in background
     }
 });
 
@@ -162,20 +164,49 @@ async function checkSingleItem(item) {
 
 // Handle notification click to open the URL
 chrome.notifications.onClicked.addListener((notificationId) => {
-    chrome.tabs.create({ url: "https://www.ozon.ru/cart" });
+    if (notificationId.startsWith('wb-')) {
+        // Handled by user opening popup
+    } else {
+        chrome.tabs.create({ url: "https://www.ozon.ru/cart" });
+    }
 });
 
-// --- Wildberries Fetch logic ---
+// --- Wildberries Background Fetch logic ---
 
-async function fetchAll(articles) {
-  const results = {};
-  for (const id of articles) {
-    results[id] = await fetchOne(id);
-  }
-  return results;
+async function startWbBackgroundFetch(articles) {
+    const total = articles.length;
+    let done = 0;
+    const results = {};
+
+    // Initialize status
+    await chrome.storage.local.set({ 
+        wbStatus: { total, done, running: true },
+        wbLastResults: {} 
+    });
+
+    for (const id of articles) {
+        const result = await fetchOneWb(id);
+        results[id] = result;
+        done++;
+        
+        // Update status and partial results
+        await chrome.storage.local.set({ 
+            wbStatus: { total, done, running: done < total },
+            wbLastResults: results
+        });
+    }
+
+    // Show completion notification
+    chrome.notifications.create(`wb-done-${Date.now()}`, {
+        type: "basic",
+        title: "Wildberries: Загрузка завершена",
+        message: `Готово! Цены по ${total} артикулам успешно загружены.`,
+        iconUrl: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=",
+        requireInteraction: true
+    });
 }
 
-async function fetchOne(articleId) {
+async function fetchOneWb(articleId) {
   return new Promise(async (resolve) => {
     const url = `https://www.wildberries.ru/catalog/${articleId}/detail.aspx`;
     const tab = await chrome.tabs.create({ url, active: false });
@@ -184,14 +215,12 @@ async function fetchOne(articleId) {
       if (tabId !== tab.id || changeInfo.status !== 'complete') return;
       chrome.tabs.onUpdated.removeListener(onUpdated);
 
-      // Give it a small moment for content script to register if needed, 
-      // though 'complete' status usually means content scripts have run or are running.
       setTimeout(() => {
           chrome.tabs.sendMessage(tab.id, { action: 'getPrices' }, async (response) => {
             await chrome.tabs.remove(tab.id);
             resolve(response ?? { wallet: null, total: null });
           });
-      }, 500); 
+      }, 1000); // 1s buffer for content script stability
     };
 
     chrome.tabs.onUpdated.addListener(onUpdated);
@@ -201,6 +230,6 @@ async function fetchOne(articleId) {
         chrome.tabs.onUpdated.removeListener(onUpdated);
         try { await chrome.tabs.remove(tab.id); } catch(e) {}
         resolve({ wallet: null, total: null });
-    }, 15000);
+    }, 20000);
   });
 }
