@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Ozon Price Tracker",
   "version": "1.0",
-  "description": "Мониторинг цен на товары Ozon.ru",
+  "description": "Мониторинг цен на товары Ozon.ru и Wildberries",
   "permissions": [
     "storage",
     "alarms",
@@ -11,12 +11,24 @@
     "scripting"
   ],
   "host_permissions": [
-    "https://www.ozon.ru/*"
+    "https://www.ozon.ru/*",
+    "https://www.wildberries.ru/*"
   ],
   "background": {
     "service_worker": "background.js"
   },
   "action": {
     "default_popup": "popup.html"
-  }
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.wildberries.ru/catalog/*/detail.aspx"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
 }

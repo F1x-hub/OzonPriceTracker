@@ -26,11 +26,14 @@ chrome.storage.onChanged.addListener((changes, namespace) => {
     }
 });
 
-// Optionally allow manual trigger from popup
+// Listen for messages
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     if (request.action === "checkPricesNow") {
         checkPrices();
         sendResponse({status: "started"});
+    } else if (request.action === 'fetchWbPrices') {
+        fetchAll(request.articles).then(sendResponse);
+        return true;
     }
 });
 
@@ -65,7 +68,6 @@ async function checkPrices() {
                 }
 
                 // Check if price dropped below or hit target
-                // Removed the (item.lastPrice > item.targetPrice) condition so it notifies every time
                 if (currentPrice <= item.targetPrice) {
                     
                     // Create notification
@@ -100,7 +102,6 @@ async function checkPrices() {
             }
         } catch (error) {
             console.error(`Error checking item ${item.url}:`, error);
-            // Skip and continue to next
         }
     }
 
@@ -154,16 +155,52 @@ async function checkSingleItem(item) {
                         }
                     });
                 });
-            }, 4000); // 4 second wait as requested
+            }, 4000); 
         });
     });
 }
 
 // Handle notification click to open the URL
 chrome.notifications.onClicked.addListener((notificationId) => {
-    // We didn't save ID natively to URL mapping in notifications, 
-    // but typically users will just want to open the site.
-    // If the message contains the URL, we could parse it, but let's just open ozon for simplicity
-    // or parse the URL from the message if we stored it uniquely.
     chrome.tabs.create({ url: "https://www.ozon.ru/cart" });
 });
+
+// --- Wildberries Fetch logic ---
+
+async function fetchAll(articles) {
+  const results = {};
+  for (const id of articles) {
+    results[id] = await fetchOne(id);
+  }
+  return results;
+}
+
+async function fetchOne(articleId) {
+  return new Promise(async (resolve) => {
+    const url = `https://www.wildberries.ru/catalog/${articleId}/detail.aspx`;
+    const tab = await chrome.tabs.create({ url, active: false });
+
+    const onUpdated = (tabId, changeInfo) => {
+      if (tabId !== tab.id || changeInfo.status !== 'complete') return;
+      chrome.tabs.onUpdated.removeListener(onUpdated);
+
+      // Give it a small moment for content script to register if needed, 
+      // though 'complete' status usually means content scripts have run or are running.
+      setTimeout(() => {
+          chrome.tabs.sendMessage(tab.id, { action: 'getPrices' }, async (response) => {
+            await chrome.tabs.remove(tab.id);
+            resolve(response ?? { wallet: null, total: null });
+          });
+      }, 500); 
+    };
+
+    chrome.tabs.onUpdated.addListener(onUpdated);
+    
+    // Safety timeout
+    setTimeout(async () => {
+        chrome.tabs.onUpdated.removeListener(onUpdated);
+        try { await chrome.tabs.remove(tab.id); } catch(e) {}
+        resolve({ wallet: null, total: null });
+    }, 15000);
+  });
+}

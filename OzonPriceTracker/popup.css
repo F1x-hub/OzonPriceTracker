@@ -106,6 +106,18 @@ button:hover {
     background-color: #004bd6;
 }
 
+.wb-btn {
+    background-color: #CB11AB;
+}
+
+.wb-btn:hover {
+    background-color: #a80e8e;
+}
+
+.wb-brand-color {
+    color: #CB11AB !important;
+}
+
 #statusMessage {
     font-size: 13px;
     color: #28a745;
@@ -164,6 +176,14 @@ button:hover {
 
 .item-url:hover {
     text-decoration: underline;
+}
+
+.wb-link {
+    color: #CB11AB;
+}
+
+.wb-link:hover {
+    color: #a80e8e;
 }
 
 .item-details {
@@ -281,4 +301,96 @@ button:hover {
     margin-top: 10px;
     padding-top: 10px;
     border-top: 1px solid #eee;
+}
+
+.platform-tag {
+    font-size: 9px;
+    padding: 2px 4px;
+    border-radius: 3px;
+    font-weight: bold;
+    text-transform: uppercase;
+}
+
+.platform-tag.ozon {
+    background-color: #e3efff;
+    color: #005bff;
+}
+
+.platform-tag.wb {
+    background-color: #fcedf9;
+    color: #CB11AB;
+}
+
+textarea {
+    width: 100%;
+    padding: 10px;
+    border: 1px solid #ddd;
+    border-radius: 6px;
+    font-size: 13px;
+    font-family: inherit;
+    resize: vertical;
+    box-sizing: border-box;
+    outline: none;
+}
+
+textarea:focus {
+    border-color: #CB11AB;
+}
+
+.wb-item {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 10px;
+    padding: 8px 10px;
+    border-bottom: 1px solid #eee;
+    background: white;
+    font-size: 13px;
+    align-items: center;
+}
+
+.wb-item:last-child {
+    border-bottom: none;
+}
+
+.wb-article {
+    color: #666;
+}
+
+.wb-wallet-price, .wb-regular-price {
+    text-align: right;
+    font-weight: bold;
+}
+
+.wb-wallet-price {
+    color: #CB11AB;
+}
+
+.wb-regular-price {
+    color: #333;
+}
+
+.wb-table-header {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 10px;
+    padding: 10px;
+    background: #fcedf9;
+    font-size: 11px;
+    font-weight: bold;
+    color: #CB11AB;
+    border-radius: 6px 6px 0 0;
+    margin-top: 15px;
+}
+
+.wb-col-price {
+    text-align: right;
+}
+
+#wbTrackedItemsList {
+    max-height: 300px;
+    overflow-y: auto;
+    border: 1px solid #fcedf9;
+    border-top: none;
+    border-radius: 0 0 6px 6px;
+    background: white;
 }

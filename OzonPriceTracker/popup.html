@@ -7,7 +7,8 @@
 </head>
 <body>
     <div class="tabs">
-        <button class="tab-btn active" data-tab="tracking-tab">Отслеживание</button>
+        <button class="tab-btn active" data-tab="tracking-tab">Ozon</button>
+        <button class="tab-btn" data-tab="wb-tab">Wildberries</button>
         <button class="tab-btn" data-tab="history-tab">История</button>
     </div>
 
@@ -56,6 +57,31 @@
         </div>
     </div>
 
+    <div class="container tab-content" id="wb-tab">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+            <h2 class="wb-brand-color" style="margin: 0;">Wildberries</h2>
+            <button id="wbExportBtn" class="wb-btn" style="padding: 5px 10px; font-size: 11px;">Экспорт в Excel</button>
+        </div>
+        
+        <div class="form-group">
+            <textarea id="wbArticles" placeholder="Артикулы WB (каждый с новой строки)
+Пример:
+252678196
+12345678" rows="6"></textarea>
+        </div>
+        
+        <button id="wbStartBtn" class="wb-btn">Старт</button>
+
+        <div class="wb-table-header">
+            <span class="wb-col-article">Артикул</span>
+            <span class="wb-col-price">С кошельком</span>
+            <span class="wb-col-price">Без кошелька</span>
+        </div>
+        <div id="wbTrackedItemsList">
+            <!-- WB results will be injected here -->
+        </div>
+    </div>
+
     <div class="container tab-content" id="history-tab">
         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
             <h2 style="margin: 0;">История уведомлений</h2>
@@ -71,6 +97,7 @@
         </div>
     </div>
 
+    <script src="xlsx.full.min.js"></script>
     <script src="popup.js"></script>
 </body>
 </html>
