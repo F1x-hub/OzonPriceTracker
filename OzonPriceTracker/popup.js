@@ -390,6 +390,190 @@ document.addEventListener('DOMContentLoaded', () => {
             if (changes.wbStatus) {
                 updateWbProgress(changes.wbStatus.newValue);
             }
+            if (changes.ozonReplyTemplates) {
+                renderReplyTemplates(changes.ozonReplyTemplates.newValue);
+            }
         }
     });
+
+    // --- Ozon Auto-Reply Templates & Settings ---
+    const delayEnabledCheck = document.getElementById('delayEnabled');
+    const delayInputsContainer = document.getElementById('delayInputsContainer');
+    const minDelayInput = document.getElementById('minDelay');
+    const maxDelayInput = document.getElementById('maxDelay');
+
+    const formTitle = document.getElementById('formTitle');
+    const templateIdInput = document.getElementById('templateId');
+    const templateTitleInput = document.getElementById('templateTitle');
+    const templateTextInput = document.getElementById('templateText');
+    const saveTemplateBtn = document.getElementById('saveTemplateBtn');
+    const cancelTemplateBtn = document.getElementById('cancelTemplateBtn');
+    const templatesList = document.getElementById('templatesList');
+
+    // Load settings and templates initially
+    loadReplySettings();
+    loadReplyTemplates();
+
+    // Toggle delay inputs visibility
+    delayEnabledCheck.addEventListener('change', () => {
+        delayInputsContainer.style.display = delayEnabledCheck.checked ? 'flex' : 'none';
+        saveReplySettings();
+    });
+
+    minDelayInput.addEventListener('change', saveReplySettings);
+    maxDelayInput.addEventListener('change', saveReplySettings);
+
+    function loadReplySettings() {
+        chrome.storage.local.get({
+            ozonReplySettings: { delayEnabled: false, minDelay: 2, maxDelay: 5 }
+        }, (result) => {
+            const settings = result.ozonReplySettings;
+            delayEnabledCheck.checked = settings.delayEnabled;
+            delayInputsContainer.style.display = settings.delayEnabled ? 'flex' : 'none';
+            minDelayInput.value = settings.minDelay || 2;
+            maxDelayInput.value = settings.maxDelay || 5;
+        });
+    }
+
+    function saveReplySettings() {
+        const minVal = parseInt(minDelayInput.value, 10) || 2;
+        const maxVal = parseInt(maxDelayInput.value, 10) || 5;
+        chrome.storage.local.set({
+            ozonReplySettings: {
+                delayEnabled: delayEnabledCheck.checked,
+                minDelay: minVal,
+                maxDelay: maxVal
+            }
+        });
+    }
+
+    // CRUD templates
+    saveTemplateBtn.addEventListener('click', () => {
+        const title = templateTitleInput.value.trim();
+        const text = templateTextInput.value.trim();
+        const id = templateIdInput.value;
+
+        if (!title || !text) {
+            alert('Пожалуйста, заполните все поля шаблона');
+            return;
+        }
+
+        chrome.storage.local.get({ ozonReplyTemplates: [] }, (result) => {
+            const templates = result.ozonReplyTemplates;
+            if (id) {
+                // Edit mode
+                const index = templates.findIndex(t => t.id === id);
+                if (index !== -1) {
+                    templates[index].title = title;
+                    templates[index].text = text;
+                }
+            } else {
+                // Create mode
+                templates.push({
+                    id: Date.now().toString(),
+                    title: title,
+                    text: text,
+                    createdAt: new Date().toISOString()
+                });
+            }
+
+            chrome.storage.local.set({ ozonReplyTemplates: templates }, () => {
+                resetTemplateForm();
+                loadReplyTemplates();
+            });
+        });
+    });
+
+    cancelTemplateBtn.addEventListener('click', resetTemplateForm);
+
+    function resetTemplateForm() {
+        formTitle.textContent = 'Новый шаблон';
+        templateIdInput.value = '';
+        templateTitleInput.value = '';
+        templateTextInput.value = '';
+        cancelTemplateBtn.style.display = 'none';
+    }
+
+    function loadReplyTemplates() {
+        chrome.storage.local.get({ ozonReplyTemplates: [] }, (result) => {
+            renderReplyTemplates(result.ozonReplyTemplates);
+        });
+    }
+
+    function renderReplyTemplates(templates) {
+        templatesList.innerHTML = '';
+        if (templates.length === 0) {
+            templatesList.innerHTML = '<div class="empty-message">Нет сохранённых шаблонов</div>';
+            return;
+        }
+
+        templates.forEach(tpl => {
+            const el = document.createElement('div');
+            el.className = 'template-item';
+            el.innerHTML = `
+                <div class="template-item-header">
+                    <span class="template-item-title">${escapeHtml(tpl.title)}</span>
+                    <button class="delete-btn" data-id="${tpl.id}" title="Удалить">&times;</button>
+                </div>
+                <div class="template-item-text">${escapeHtml(tpl.text)}</div>
+                <div class="template-actions">
+                    <button class="edit-btn" data-id="${tpl.id}">Редактировать</button>
+                </div>
+            `;
+
+            // Delete handler
+            el.querySelector('.delete-btn').addEventListener('click', (e) => {
+                const id = e.target.getAttribute('data-id');
+                if (confirm('Вы уверены, что хотите удалить этот шаблон?')) {
+                    deleteTemplate(id);
+                }
+            });
+
+            // Edit handler
+            el.querySelector('.edit-btn').addEventListener('click', (e) => {
+                const id = e.target.getAttribute('data-id');
+                startEditTemplate(id);
+            });
+
+            templatesList.appendChild(el);
+        });
+    }
+
+    function deleteTemplate(id) {
+        chrome.storage.local.get({ ozonReplyTemplates: [] }, (result) => {
+            const filtered = result.ozonReplyTemplates.filter(t => t.id !== id);
+            chrome.storage.local.set({ ozonReplyTemplates: filtered }, () => {
+                loadReplyTemplates();
+                // If editing deleted template, reset form
+                if (templateIdInput.value === id) {
+                    resetTemplateForm();
+                }
+            });
+        });
+    }
+
+    function startEditTemplate(id) {
+        chrome.storage.local.get({ ozonReplyTemplates: [] }, (result) => {
+            const tpl = result.ozonReplyTemplates.find(t => t.id === id);
+            if (tpl) {
+                formTitle.textContent = 'Редактировать шаблон';
+                templateIdInput.value = tpl.id;
+                templateTitleInput.value = tpl.title;
+                templateTextInput.value = tpl.text;
+                cancelTemplateBtn.style.display = 'block';
+                document.getElementById('reviews-tab').scrollTop = 0;
+            }
+        });
+    }
+
+    function escapeHtml(text) {
+        const map = {
+            '&': '&amp;',
+            '<': '&lt;',
+            '>': '&gt;',
+            '"': '&quot;',
+            "'": '&#039;'
+        };
+        return text.replace(/[&<>"']/g, function(m) { return map[m]; });
+    }
 });

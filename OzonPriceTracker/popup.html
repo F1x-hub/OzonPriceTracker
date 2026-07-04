@@ -9,6 +9,7 @@
     <div class="tabs">
         <button class="tab-btn active" data-tab="tracking-tab">Ozon</button>
         <button class="tab-btn" data-tab="wb-tab">Wildberries</button>
+        <button class="tab-btn" data-tab="reviews-tab">Ответы</button>
         <button class="tab-btn" data-tab="history-tab">История</button>
     </div>
 
@@ -92,6 +93,48 @@
         </div>
         <div id="wbTrackedItemsList">
             <!-- WB results will be injected here -->
+        </div>
+    </div>
+
+    <div class="container tab-content" id="reviews-tab">
+        <h2>Ответы на отзывы</h2>
+        
+        <!-- Delay Settings -->
+        <div class="settings-box">
+            <label class="checkbox-container">
+                <input type="checkbox" id="delayEnabled">
+                Включить задержку
+            </label>
+            <div id="delayInputsContainer" class="delay-inputs" style="display: none; align-items: center; gap: 5px; margin-top: 8px;">
+                <input type="number" id="minDelay" placeholder="мин" min="1" value="2" style="width: 60px; padding: 6px; border: 1px solid #ddd; border-radius: 4px;">
+                <span>-</span>
+                <input type="number" id="maxDelay" placeholder="макс" min="1" value="5" style="width: 60px; padding: 6px; border: 1px solid #ddd; border-radius: 4px;">
+                <span>сек</span>
+            </div>
+        </div>
+
+        <!-- Template Form -->
+        <div class="template-form">
+            <h3 id="formTitle" style="font-size: 14px; margin: 5px 0 10px 0; color: #333;">Новый шаблон</h3>
+            <input type="hidden" id="templateId">
+            <div class="form-group" style="margin-bottom: 8px;">
+                <input type="text" id="templateTitle" placeholder="Название шаблона (например, Спасибо)" required style="padding: 8px; border: 1px solid #ddd; border-radius: 6px; font-size: 13px;">
+            </div>
+            <div class="form-group" style="margin-bottom: 8px;">
+                <textarea id="templateText" placeholder="Текст автоответа..." rows="4" required style="width: 100%; box-sizing: border-box;"></textarea>
+            </div>
+            <div style="display: flex; gap: 8px;">
+                <button id="saveTemplateBtn" style="flex-grow: 1; padding: 8px; font-size: 13px;">Сохранить</button>
+                <button id="cancelTemplateBtn" style="flex-grow: 1; padding: 8px; font-size: 13px; background-color: #6c757d; display: none;">Отмена</button>
+            </div>
+        </div>
+
+        <!-- Templates List -->
+        <div class="tracked-items-header">
+            <h3>Сохранённые шаблоны</h3>
+        </div>
+        <div id="templatesList" style="max-height: 200px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px;">
+            <!-- Templates will be injected here -->
         </div>
     </div>
 
