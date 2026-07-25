@@ -1,14 +1,90 @@
-// Ozon Seller Auto-Reply Content Script
+// Ozon Seller Content Script (Reviews Auto-Reply & Bulk Rich-Content Filler)
 
 (function() {
     if (window.__optExtSellerScriptLoaded) {
-        console.log('[opt-ext] Скрипт автоответов Ozon Seller уже загружен, пропускаю повторную инициализацию.');
+        console.log('[opt-ext] Скрипт Ozon Seller уже загружен, пропускаю повторную инициализацию.');
         return;
     }
     window.__optExtSellerScriptLoaded = true;
 
-    let rowStates = new Map(); // Key: rowId, Value: { checked: boolean, templateId: string, templateText: string, repliesCount: number }
-    let overlayElements = new Map(); // Key: rowId, Value: { checkWrapper: HTMLDivElement, selectWrapper: HTMLDivElement }
+    // Helper functions
+    function sleep(ms) {
+        return new Promise(resolve => setTimeout(resolve, ms));
+    }
+
+    function cleanRichContentText(text) {
+        if (!text) return '';
+        let result = text;
+        // Replace <br>, <br/>, <br />, &lt;br/&gt;, &lt;br&gt; with \n
+        result = result.replace(/(&lt;|<)br\s*\/?>?(&gt;|>)/gi, '\n');
+        // Replace block end tags like </p>, </div>, </li>, </tr>, &lt;/p&gt; etc. with \n
+        result = result.replace(/(&lt;|<)\/(p|div|li|tr|h[1-6])(&gt;|>)/gi, '\n');
+        // Decode common HTML entities
+        result = result.replace(/&nbsp;/gi, ' ')
+                       .replace(/&quot;/gi, '"')
+                       .replace(/&apos;|&#39;/gi, "'")
+                       .replace(/&lt;/gi, '<')
+                       .replace(/&gt;/gi, '>')
+                       .replace(/&amp;/gi, '&');
+        // Remove any remaining HTML tags if present
+        result = result.replace(/<[^>]+>/g, '');
+        // Normalize line breaks
+        result = result.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+        // Reduce 3 or more consecutive newlines to 2 newlines
+        result = result.replace(/\n{3,}/g, '\n\n');
+        // Trim each line and join back with \n
+        return result.split('\n').map(line => line.trim()).join('\n').trim();
+    }
+
+    function setNativeValue(element, value) {
+        const proto = Object.getPrototypeOf(element);
+        const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+        setter?.call(element, value);
+        element.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+
+    async function realDblClick(el) {
+        const rect1 = el.getBoundingClientRect();
+        const opts1 = {
+            bubbles: true,
+            cancelable: true,
+            view: window,
+            clientX: rect1.left + rect1.width / 2,
+            clientY: rect1.top + rect1.height / 2,
+            detail: 1
+        };
+
+        // Click 1: mousedown -> mouseup -> click
+        el.dispatchEvent(new MouseEvent('mousedown', opts1));
+        el.dispatchEvent(new MouseEvent('mouseup', opts1));
+        el.dispatchEvent(new MouseEvent('click', opts1));
+
+        // Pause ~200ms between separate clicks
+        await sleep(200);
+
+        const rect2 = el.getBoundingClientRect();
+        const opts2 = {
+            bubbles: true,
+            cancelable: true,
+            view: window,
+            clientX: rect2.left + rect2.width / 2,
+            clientY: rect2.top + rect2.height / 2,
+            detail: 2
+        };
+
+        // Click 2: mousedown -> mouseup -> click (+ dblclick)
+        el.dispatchEvent(new MouseEvent('mousedown', opts2));
+        el.dispatchEvent(new MouseEvent('mouseup', opts2));
+        el.dispatchEvent(new MouseEvent('click', opts2));
+        el.dispatchEvent(new MouseEvent('dblclick', opts2));
+    }
+
+    // =========================================================================
+    // MODULE 1: Reviews Auto-Reply (seller.ozon.ru/app/reviews*)
+    // =========================================================================
+
+    let rowStates = new Map();
+    let overlayElements = new Map();
     let savedTemplates = [];
     let replySettings = { delayEnabled: false, minDelay: 2, maxDelay: 5 };
     let isRunning = false;
@@ -20,18 +96,23 @@
     let bulkSelectWrapper = null;
     let isRepositioning = false;
 
-    // Initialize templates and settings from storage
-    chrome.storage.local.get(['ozonReplyTemplates', 'ozonReplySettings'], (result) => {
-        if (result.ozonReplyTemplates) {
-            savedTemplates = result.ozonReplyTemplates;
-        }
-        if (result.ozonReplySettings) {
-            replySettings = result.ozonReplySettings;
-        }
-        initUI();
-    });
+    let floatBtnContainer = null;
+    let floatBtn = null;
 
-    // Listen for storage changes
+    function initReviewsAutoReply() {
+        if (document.getElementById('opt-ext-float-container')) return;
+
+        chrome.storage.local.get(['ozonReplyTemplates', 'ozonReplySettings'], (result) => {
+            if (result.ozonReplyTemplates) {
+                savedTemplates = result.ozonReplyTemplates;
+            }
+            if (result.ozonReplySettings) {
+                replySettings = result.ozonReplySettings;
+            }
+            initReviewsUI();
+        });
+    }
+
     chrome.storage.onChanged.addListener((changes, namespace) => {
         if (namespace === 'local') {
             if (changes.ozonReplyTemplates) {
@@ -45,11 +126,7 @@
         }
     });
 
-    // Create and inject floating control button and overlays
-    let floatBtnContainer = null;
-    let floatBtn = null;
-
-    function initUI() {
+    function initReviewsUI() {
         if (document.getElementById('opt-ext-float-container')) return;
 
         // 1. Floating panel
@@ -131,7 +208,7 @@
         window.addEventListener('resize', requestReposition);
         window.addEventListener('scroll', requestReposition, true);
 
-        // Observe DOM changes (Read-only, never modifying Ozon DOM nodes to prevent loops)
+        // Observe DOM changes
         observer = new MutationObserver((mutations) => {
             const hasExternalMutations = mutations.some(mut => {
                 const target = mut.target;
@@ -177,12 +254,10 @@
             .map(([rowId, state]) => ({ rowId, ...state }));
     }
 
-    // Dynamic table processing
     let reviewColIndex = -1;
     let repliesColIndex = -1;
     let productColIndex = -1;
     let dateColIndex = -1;
-
     let registeredScrollParents = new Set();
 
     function findHeaderTable() {
@@ -207,7 +282,6 @@
 
     function findRowsTable() {
         const tables = document.querySelectorAll('table');
-        // Look for the table having tbody tr with images (product images)
         for (let table of tables) {
             const tbody = table.querySelector('tbody');
             if (tbody) {
@@ -219,7 +293,6 @@
                 }
             }
         }
-        // Fallback to table having tbody rows and is not the header table
         const headerTable = findHeaderTable();
         for (let table of tables) {
             if (table === headerTable) continue;
@@ -251,12 +324,6 @@
         if (!table) return;
 
         const ths = table.querySelectorAll('thead th');
-        const thDumps = Array.from(ths).map(th => ({
-            text: th.textContent.trim(),
-            colspan: th.getAttribute('colspan') || '1'
-        }));
-        console.log('[opt-ext] Заголовки (th):', thDumps);
-
         const headers = Array.from(ths);
         if (headers.length > 0) {
             let currentCellIndex = 0;
@@ -275,12 +342,6 @@
                 }
                 
                 currentCellIndex += colspan;
-            });
-            console.log('[opt-ext] Вычисленные индексы колонок (с учетом colspan):', {
-                reviewColIndex,
-                repliesColIndex,
-                productColIndex,
-                dateColIndex
             });
         }
     }
@@ -311,20 +372,16 @@
             return;
         }
 
-        // 1. Position Bulk Select check-all th (using headerTable)
         const firstTh = headerTable ? headerTable.querySelector('thead th') : null;
         if (firstTh && checkAllWrapper && bulkSelectWrapper) {
             const thRect = firstTh.getBoundingClientRect();
-            const nativeCheckboxEl = firstTh.querySelector('input[type="checkbox"]') || firstTh.querySelector('[class*="checkbox"]') || firstTh;
-            const nativeCheckboxRect = nativeCheckboxEl.getBoundingClientRect();
-
             const checkWidth = 32;
             const dropdownWidth = 90;
             const gap = 6;
 
             let checkLeft = thRect.left - checkWidth - gap + window.scrollX;
             if (checkLeft < window.scrollX) {
-                checkLeft = thRect.right + window.scrollX; // Fallback to right side if no room on the left
+                checkLeft = thRect.right + window.scrollX;
             }
 
             checkAllWrapper.style.left = `${checkLeft}px`;
@@ -339,7 +396,6 @@
                 border-right: 1px dashed #c0d6ff;
             `;
 
-            // Dropdown is positioned immediately to the right of our checkbox wrapper
             const dropdownLeft = checkLeft + checkWidth + gap;
             bulkSelectWrapper.style.left = `${dropdownLeft}px`;
             bulkSelectWrapper.style.top = `${thRect.top + window.scrollY}px`;
@@ -350,13 +406,6 @@
                 align-items: center;
                 justify-content: center;
             `;
-
-            // Verification log
-            console.log('[opt-ext] Порядок в шапке (left→right):', {
-                ourCheckbox: checkAllWrapper.getBoundingClientRect().left,
-                templateDropdown: bulkSelectWrapper.getBoundingClientRect().left,
-                nativeCheckbox: nativeCheckboxRect.left
-            });
         } else {
             if (checkAllWrapper) checkAllWrapper.style.display = 'none';
             if (bulkSelectWrapper) bulkSelectWrapper.style.display = 'none';
@@ -368,22 +417,16 @@
         rows.forEach((tr, i) => {
             try {
                 const cells = tr.querySelectorAll('td');
-                if (cells.length === 0) {
-                    return;
-                }
+                if (cells.length === 0) return;
 
                 const rowData = getRowData(tr, i);
-                if (!rowData) {
-                    return;
-                }
+                if (!rowData) return;
 
-                // Calculate coordinates
                 const firstTd = cells[0];
                 const lastTd = cells[cells.length - 1];
 
                 visibleRowIds.add(rowData.rowId);
 
-                // Maintain state mapping
                 if (!rowStates.has(rowData.rowId)) {
                     rowStates.set(rowData.rowId, {
                         checked: false,
@@ -403,21 +446,18 @@
 
                 const state = rowStates.get(rowData.rowId);
 
-                // Get or create overlay DOM elements
                 let elPair = overlayElements.get(rowData.rowId);
                 if (!elPair) {
                     elPair = createRowOverlayElements(rowData.rowId);
                     overlayElements.set(rowData.rowId, elPair);
                 }
 
-                // Sync values to DOM controls
                 const checkInput = elPair.checkWrapper.querySelector('.opt-ext-reply-checkbox');
                 if (checkInput) {
                     checkInput.checked = state.checked;
                     checkInput.disabled = rowData.repliesCount > 0;
                 }
 
-                // Sync select values
                 const select = elPair.selectWrapper.querySelector('.opt-ext-template-select');
                 if (select) {
                     select.value = state.templateId;
@@ -430,7 +470,7 @@
                     const gap = 8;
                     let checkLeft = firstTdRect.left - checkWidth - gap + window.scrollX;
                     if (checkLeft < window.scrollX) {
-                        checkLeft = firstTdRect.right + window.scrollX; // Fallback to right side
+                        checkLeft = firstTdRect.right + window.scrollX;
                     }
                     elPair.checkWrapper.style.left = `${checkLeft}px`;
                     elPair.checkWrapper.style.top = `${firstTdRect.top + window.scrollY}px`;
@@ -449,10 +489,8 @@
                     elPair.selectWrapper.style.width = `${dropdownWidth}px`;
                     elPair.selectWrapper.style.height = `${lastTdRect.height}px`;
 
-                    // Logic for select visibility
                     if (rowData.repliesCount > 0) {
                         elPair.selectWrapper.style.display = 'flex';
-                        // Show "Уже отвечено"
                         if (select) select.style.display = 'none';
                         let span = elPair.selectWrapper.querySelector('.opt-ext-replied-span');
                         if (!span) {
@@ -466,8 +504,6 @@
                         let span = elPair.selectWrapper.querySelector('.opt-ext-replied-span');
                         if (span) span.remove();
                         if (select) select.style.display = 'block';
-                        
-                        // Show only if checked
                         elPair.selectWrapper.style.display = state.checked ? 'flex' : 'none';
                     }
                 } else {
@@ -478,7 +514,6 @@
             }
         });
 
-        // Hide overlay elements that are not currently in the viewport/DOM
         overlayElements.forEach((elPair, rowId) => {
             if (!visibleRowIds.has(rowId)) {
                 elPair.checkWrapper.style.display = 'none';
@@ -491,7 +526,6 @@
     }
 
     function createRowOverlayElements(rowId) {
-        // 1. Checkbox Wrapper
         const checkWrapper = document.createElement('div');
         checkWrapper.className = 'opt-ext-checkbox-wrapper';
         checkWrapper.style.cssText = `
@@ -523,7 +557,6 @@
         checkWrapper.appendChild(checkInput);
         overlayContainer.appendChild(checkWrapper);
 
-        // 2. Select Dropdown Wrapper
         const selectWrapper = document.createElement('div');
         selectWrapper.className = 'opt-ext-select-wrapper';
         selectWrapper.style.cssText = `
@@ -603,7 +636,6 @@
 
     function populateSelect(select, rowId) {
         select.innerHTML = '';
-        
         const defaultOpt = document.createElement('option');
         defaultOpt.value = '';
         defaultOpt.textContent = 'Не выбран';
@@ -626,9 +658,8 @@
     function populateBulkSelect() {
         const bulkSelect = bulkSelectWrapper ? bulkSelectWrapper.querySelector('.opt-ext-bulk-template-select') : null;
         if (!bulkSelect) return;
-        
         bulkSelect.innerHTML = '';
-        
+
         const defaultOpt = document.createElement('option');
         defaultOpt.value = '';
         defaultOpt.textContent = 'Применить...';
@@ -638,9 +669,8 @@
             const opt = document.createElement('option');
             opt.value = tpl.id;
             opt.textContent = tpl.title;
-            bulkSelect.appendChild(opt);
+            select.appendChild(opt);
         });
-        
         bulkSelect.value = '';
     }
 
@@ -663,7 +693,6 @@
             });
         }
 
-        // Reset bulk select back to empty (one-off trigger)
         e.target.value = '';
         requestReposition();
     }
@@ -674,7 +703,6 @@
         selects.forEach(select => {
             const wrapper = select.closest('.opt-ext-select-wrapper');
             if (wrapper) {
-                // Find matching rowId key from Map
                 for (let [key, val] of overlayElements.entries()) {
                     if (val.selectWrapper === wrapper) {
                         populateSelect(select, key);
@@ -701,7 +729,6 @@
             }
         }
 
-        // Reset the bulk select to empty
         const bulkSelect = bulkSelectWrapper ? bulkSelectWrapper.querySelector('.opt-ext-bulk-template-select') : null;
         if (bulkSelect) {
             bulkSelect.value = '';
@@ -712,8 +739,6 @@
 
     function handleSelectAllChange(e) {
         const checked = e.target.checked;
-        
-        // Loop all states and update checked status for visible rows with repliesCount == 0
         const rowsTable = findRowsTable();
         if (!rowsTable) return;
 
@@ -772,9 +797,7 @@
         }
     }
 
-    // Floating Button click handler
     function handleFloatBtnClick() {
-        console.log('[opt-ext] handleFloatBtnClick вызван, timestamp:', Date.now());
         if (isRunning) {
             isRunning = false;
             updateFloatBtn();
@@ -783,18 +806,12 @@
         }
     }
 
-    // Automation Runner
     async function startSending() {
         isRunning = true;
         failedReplies = [];
         updateFloatBtn();
 
         const itemsToSend = getQueueItems();
-        console.log('[opt-ext] Очередь на отправку:', itemsToSend.map(item => ({
-            rowKey: item.rowId,
-            templateId: item.templateId,
-            templateText: item.templateText?.slice(0, 30)
-        })));
 
         for (let i = 0; i < itemsToSend.length; i++) {
             if (!isRunning) break;
@@ -809,13 +826,12 @@
             }
 
             if (success) {
-                // Reset states
                 const state = rowStates.get(item.rowId);
                 if (state) {
                     state.checked = false;
                     state.templateId = '';
                     state.templateText = '';
-                    state.repliesCount = 1; // Mark as answered
+                    state.repliesCount = 1;
                 }
             } else {
                 failedReplies.push(item);
@@ -823,7 +839,6 @@
 
             requestReposition();
 
-            // Delay if enabled and not the last element
             if (isRunning && i < itemsToSend.length - 1) {
                 if (replySettings.delayEnabled) {
                     const min = replySettings.minDelay || 2;
@@ -846,143 +861,52 @@
     }
 
     async function sendSingleReply(item) {
-        console.log('[opt-ext] sendSingleReply: ищу строку с rowKey =', item.rowId);
-        
         try {
-            const rowsTable = findRowsTable();
-            console.log('[opt-ext] rowsTable на момент отправки найдена:', !!rowsTable);
-
-            if (rowsTable) {
-                const currentRows = rowsTable.querySelectorAll('tbody > tr');
-                console.log('[opt-ext] Строк в DOM на момент отправки:', currentRows.length);
-                const allKeys = Array.from(currentRows).map((r, idx) => {
-                    const rowData = getRowData(r, idx);
-                    return rowData ? rowData.rowId : null;
-                });
-                console.log('[opt-ext] Все rowKey текущих строк:', allKeys);
-            }
-
-            // Find row in DOM
             let tr = findRowElement(item.rowId);
-            console.log('[opt-ext] Строка найдена:', !!tr, 'сравнение с искомым ключом:', item.rowId);
-
             if (!tr) {
-                console.warn("Row not found in DOM, attempting to scroll or wait...");
-
-                // Find similar keys by product text (article)
-                if (rowsTable) {
-                    const currentRows = rowsTable.querySelectorAll('tbody > tr');
-                    const targetProduct = item.rowId.split('::')[0];
-                    let closestKey = null;
-                    for (let idx = 0; idx < currentRows.length; idx++) {
-                        const rowData = getRowData(currentRows[idx], idx);
-                        if (rowData) {
-                            const prod = rowData.rowId.split('::')[0];
-                            if (prod === targetProduct) {
-                                closestKey = rowData.rowId;
-                                break;
-                            }
-                        }
-                    }
-                    console.log('[opt-ext] Искомый key:', JSON.stringify(item.rowId));
-                    console.log('[opt-ext] Похожий по артикулу key:', JSON.stringify(closestKey));
-                }
-
-                console.log('[opt-ext] Пытаюсь scrollIntoView для рядов с похожим индексом / жду появления строки, таймаут = 3000ms');
-                // Scroll / wait loop
                 for (let waitCount = 0; waitCount < 10; waitCount++) {
                     await sleep(300);
                     tr = findRowElement(item.rowId);
                     if (tr) break;
                 }
-                console.log('[opt-ext] После ожидания строка найдена:', !!tr);
-
-                if (!tr) {
-                    return false;
-                }
+                if (!tr) return false;
             }
 
-            // Extract index from rowId (e.g. key ends with ::row_N)
             let rowIdx = 0;
             const parts = item.rowId.split('::row_');
             if (parts.length > 1) {
                 rowIdx = parseInt(parts[1], 10) || 0;
             }
 
-            // Re-verify repliesCount before real sending
             const rowData = getRowData(tr, rowIdx);
             if (rowData && rowData.repliesCount > 0) {
-                console.log(`Review already answered (repliesCount = ${rowData.repliesCount}), skipping:`, item.rowId);
                 return true;
             }
 
-            // Scroll into view
             tr.scrollIntoView({ block: 'center' });
             await sleep(500);
 
-            // Click on the review cell's title element
             const cells = tr.querySelectorAll('td');
-            console.log('[opt-ext] Индекс колонки "Отзыв":', reviewColIndex);
-            
             const reviewCell = cells[reviewColIndex];
-            console.log('[opt-ext] Ячейка отзыва (проверка):', reviewCell?.outerHTML?.slice(0, 150));
-
-            if (!reviewCell) {
-                console.error('[opt-ext] Ячейка отзыва не найдена по индексу:', reviewColIndex);
-                return false;
-            }
+            if (!reviewCell) return false;
 
             const clickable = getReviewTextElement(reviewCell);
-            if (!clickable) {
-                console.error('[opt-ext] Element for review text not found inside reviewCell!');
-                return false;
-            }
+            if (!clickable) return false;
 
-            console.log('[opt-ext] Элемент всё ещё в DOM перед кликом:', document.body.contains(clickable));
-            console.log('[opt-ext] Кликаю по элементу строки:', clickable, 'outerHTML:', clickable?.outerHTML?.slice(0, 150));
-            
-            try {
-                clickable.click();
-                console.log('[opt-ext] Клик по строке выполнен успешно');
-            } catch (e) {
-                console.error('[opt-ext] Ошибка при клике по строке:', e);
-            }
+            clickable.click();
 
-            // Wait for side panel / textarea to load
-            console.log('[opt-ext] Жду появления #AnswerCommentForm...');
-            const startTime = Date.now();
             const formLoaded = await waitForElement('#AnswerCommentForm', 5000);
-            const elapsedMs = Date.now() - startTime;
-            if (!formLoaded) {
-                console.error('[opt-ext] #AnswerCommentForm НЕ найден за', 5000, 'мс');
-                return false;
-            }
+            if (!formLoaded) return false;
 
             const textarea = document.querySelector('#AnswerCommentForm');
-            console.log('[opt-ext] #AnswerCommentForm найден:', !!textarea, 'через', elapsedMs, 'мс');
             if (!textarea) return false;
 
-            // Set React controlled textarea value
-            console.log('[opt-ext] Вставляю текст шаблона:', item.templateText.slice(0, 50));
-            const nativeSetter = Object.getOwnPropertyDescriptor(
-                window.HTMLTextAreaElement.prototype, 'value'
-            ).set;
-            nativeSetter.call(textarea, item.templateText);
-            textarea.dispatchEvent(new Event('input', { bubbles: true }));
-            console.log('[opt-ext] Значение textarea после вставки:', textarea.value.slice(0, 50));
+            setNativeValue(textarea, item.templateText);
 
-            // Find submit button in the parent container
-            console.log('[opt-ext] Ищу кнопку отправки среди button[type=submit] без текста...');
             let parent = textarea.parentElement;
             let submitBtn = null;
             while (parent) {
                 const candidates = parent.querySelectorAll('button[type="submit"]');
-                console.log('[opt-ext] Найдено кандидатов:', candidates.length, 
-                    Array.from(candidates).map(b => ({
-                        text: b.textContent.trim(),
-                        html: b.outerHTML.slice(0, 100)
-                    }))
-                );
                 for (let btn of candidates) {
                     if (btn.textContent.trim() === '') {
                         submitBtn = btn;
@@ -993,18 +917,9 @@
                 parent = parent.parentElement;
             }
 
-            console.log('[opt-ext] Выбрана кнопка отправки:', !!submitBtn);
-            if (!submitBtn) {
-                console.error("Submit button not found.");
-                return false;
-            }
-
-            // Click submit
-            console.log('[opt-ext] Кликаю кнопку отправки...');
+            if (!submitBtn) return false;
             submitBtn.click();
-            console.log('[opt-ext] Клик выполнен, жду подтверждения...');
 
-            // Wait for confirmation (textarea cleared or disappeared)
             let sentConfirmed = false;
             for (let poll = 0; poll < 10; poll++) {
                 await sleep(300);
@@ -1015,11 +930,6 @@
                 }
             }
 
-            if (!sentConfirmed) {
-                console.warn("Could not confirm reply submission, but proceeding.");
-            }
-
-            // Close side panel
             const closeBtn = findCloseButton(textarea);
             if (closeBtn) {
                 closeBtn.click();
@@ -1028,26 +938,19 @@
 
             return true;
         } catch (e) {
-            console.error('[opt-ext] Ошибка в sendSingleReply для rowKey =', item.rowId, e, e.stack);
+            console.error('[opt-ext] Ошибка в sendSingleReply:', e);
             return false;
         }
     }
 
     function findRowElement(rowId) {
-        console.log('[opt-ext] findRowElement: тип rowId:', typeof rowId, 'значение:', rowId);
         const rowsTable = findRowsTable();
         if (!rowsTable) return null;
         const rows = rowsTable.querySelectorAll('tbody > tr');
         for (let i = 0; i < rows.length; i++) {
             const tr = rows[i];
             const data = getRowData(tr, i);
-            const key = data ? data.rowId : null;
-            const match = key === rowId;
-            console.log('[opt-ext] Сравниваю:', JSON.stringify(key), 'vs', 
-                JSON.stringify(rowId), '-> совпадение:', match, 
-                'типы:', typeof key, typeof rowId,
-                'длины:', key?.length, rowId?.length);
-            if (match) {
+            if (data && data.rowId === rowId) {
                 return tr;
             }
         }
@@ -1080,7 +983,840 @@
         });
     }
 
-    function sleep(ms) {
-        return new Promise(resolve => setTimeout(resolve, ms));
+    // =========================================================================
+    // MODULE 2: Bulk Rich-Content Filling (seller.ozon.ru/app/products/edit/*)
+    // =========================================================================
+
+    const COL_ID_ANNOTATION = 'attribute#4191';
+    const COL_ID_RICH_CONTENT = 'attribute#11254';
+    const COL_ID_BRAND = 'attribute#85';
+    const COL_ID_MODEL = 'attribute#9048';
+
+    let richFillerRunning = false;
+    let richFillerPaused = false;
+    let richFillerStopRequested = false;
+
+    let richFillerContainer = null;
+    let richFillerControlsRow = null;
+    let richFillerBtn = null;
+    let richFillerPauseBtn = null;
+    let richFillerStopBtn = null;
+    let richFillerProgress = null;
+
+    function initRichContentBulkFiller() {
+        if (document.getElementById('opt-ext-rich-filler-container')) return;
+
+        // 1. Create Floating UI Container
+        richFillerContainer = document.createElement('div');
+        richFillerContainer.id = 'opt-ext-rich-filler-container';
+        richFillerContainer.style.cssText = `
+            position: fixed;
+            bottom: 90px;
+            right: 20px;
+            z-index: 10000;
+            display: flex;
+            flex-direction: column;
+            align-items: flex-end;
+            gap: 8px;
+            font-family: 'Inter', system-ui, -apple-system, sans-serif;
+        `;
+
+        // 2. Progress Indicator Text
+        richFillerProgress = document.createElement('div');
+        richFillerProgress.id = 'opt-ext-rich-filler-progress';
+        richFillerProgress.style.cssText = `
+            background: rgba(15, 23, 42, 0.85);
+            color: #ffffff;
+            padding: 6px 12px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 600;
+            display: none;
+            backdrop-filter: blur(8px);
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        `;
+        richFillerProgress.textContent = '';
+
+        // 3. Control buttons row (Stop and Pause buttons left of main button)
+        richFillerControlsRow = document.createElement('div');
+        richFillerControlsRow.style.cssText = `
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        `;
+
+        // 3a. Stop Button
+        richFillerStopBtn = document.createElement('button');
+        richFillerStopBtn.id = 'opt-ext-rich-filler-stop-btn';
+        richFillerStopBtn.textContent = '⏹ Остановить';
+        richFillerStopBtn.title = 'Остановить процесс (завершится после текущего сохранения)';
+        richFillerStopBtn.style.cssText = `
+            background: rgba(225, 29, 72, 0.9);
+            color: white;
+            border: none;
+            padding: 10px 16px;
+            border-radius: 20px;
+            font-weight: 600;
+            font-size: 12px;
+            box-shadow: 0 4px 12px rgba(225, 29, 72, 0.3);
+            cursor: pointer;
+            transition: all 0.2s ease;
+            display: none;
+            align-items: center;
+            gap: 6px;
+            backdrop-filter: blur(8px);
+        `;
+        richFillerStopBtn.addEventListener('click', () => {
+            if (richFillerRunning) {
+                richFillerStopRequested = true;
+                richFillerStopBtn.textContent = '⏳ Остановка...';
+                richFillerStopBtn.disabled = true;
+                richFillerStopBtn.style.opacity = '0.7';
+                console.log('[opt-ext] Запрошена остановка процесса...');
+            }
+        });
+
+        // 3b. Pause / Resume Button
+        richFillerPauseBtn = document.createElement('button');
+        richFillerPauseBtn.id = 'opt-ext-rich-filler-pause-btn';
+        richFillerPauseBtn.textContent = '⏸ Пауза';
+        richFillerPauseBtn.title = 'Поставить на паузу (остановится после нажатия Применить)';
+        richFillerPauseBtn.style.cssText = `
+            background: rgba(217, 119, 6, 0.9);
+            color: white;
+            border: none;
+            padding: 10px 16px;
+            border-radius: 20px;
+            font-weight: 600;
+            font-size: 12px;
+            box-shadow: 0 4px 12px rgba(217, 119, 6, 0.3);
+            cursor: pointer;
+            transition: all 0.2s ease;
+            display: none;
+            align-items: center;
+            gap: 6px;
+            backdrop-filter: blur(8px);
+        `;
+        richFillerPauseBtn.addEventListener('click', () => {
+            if (!richFillerRunning) return;
+            if (richFillerPaused) {
+                // Resume
+                richFillerPaused = false;
+                richFillerPauseBtn.textContent = '⏸ Пауза';
+                richFillerPauseBtn.style.background = 'rgba(217, 119, 6, 0.9)';
+                console.log('[opt-ext] Процесс возобновлен пользователем.');
+            } else {
+                // Pause
+                richFillerPaused = true;
+                richFillerPauseBtn.textContent = '▶ Продолжить';
+                richFillerPauseBtn.style.background = 'rgba(16, 185, 129, 0.9)';
+                console.log('[opt-ext] Запрошена пауза...');
+            }
+        });
+
+        // 3c. Main Floating Action Button
+        richFillerBtn = document.createElement('button');
+        richFillerBtn.id = 'opt-ext-rich-filler-btn';
+        richFillerBtn.textContent = '✨ Заполнить Rich-контент';
+        richFillerBtn.title = 'Массово вставить Rich-контент из описания/аннотации товаров';
+        richFillerBtn.style.cssText = `
+            background: linear-gradient(135deg, #005bff, #003db3);
+            color: white;
+            border: none;
+            padding: 12px 20px;
+            border-radius: 24px;
+            font-weight: 600;
+            font-size: 13px;
+            box-shadow: 0 4px 15px rgba(0, 91, 255, 0.35);
+            cursor: pointer;
+            transition: all 0.2s ease;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        `;
+
+        richFillerBtn.addEventListener('mouseenter', () => {
+            if (!richFillerRunning) {
+                richFillerBtn.style.transform = 'translateY(-2px)';
+                richFillerBtn.style.boxShadow = '0 6px 20px rgba(0, 91, 255, 0.45)';
+            }
+        });
+        richFillerBtn.addEventListener('mouseleave', () => {
+            if (!richFillerRunning) {
+                richFillerBtn.style.transform = 'none';
+                richFillerBtn.style.boxShadow = '0 4px 15px rgba(0, 91, 255, 0.35)';
+            }
+        });
+
+        richFillerBtn.addEventListener('click', startRichContentProcessing);
+
+        richFillerControlsRow.appendChild(richFillerStopBtn);
+        richFillerControlsRow.appendChild(richFillerPauseBtn);
+        richFillerControlsRow.appendChild(richFillerBtn);
+
+        richFillerContainer.appendChild(richFillerProgress);
+        richFillerContainer.appendChild(richFillerControlsRow);
+
+        attachRichFillerUI();
+
+        // Reposition observer relative to Ozon floating assistant button
+        const repositionObserver = new MutationObserver(() => {
+            attachRichFillerUI();
+        });
+        repositionObserver.observe(document.body, { childList: true, subtree: true });
     }
+
+    function attachRichFillerUI() {
+        if (!richFillerContainer) return;
+        if (!document.body.contains(richFillerContainer)) {
+            document.body.appendChild(richFillerContainer);
+        }
+
+        const assistantBtn = document.querySelector('[data-onboarding-target="floating-ai-assistant-button"]');
+        if (assistantBtn) {
+            const parentWrapper = assistantBtn.closest('.n2d-a9f') || assistantBtn.parentElement;
+            if (parentWrapper && typeof parentWrapper.getBoundingClientRect === 'function') {
+                const rect = parentWrapper.getBoundingClientRect();
+                if (rect.bottom > 0 && rect.right > 0) {
+                    const bottomOffset = window.innerHeight - rect.top + 12;
+                    richFillerContainer.style.bottom = `${bottomOffset}px`;
+                    richFillerContainer.style.right = `${window.innerWidth - rect.right}px`;
+                }
+            }
+        }
+    }
+
+    function findCellInGridRow(rowIndex, colId) {
+        // 1. Check center container row first
+        let cell = document.querySelector(`.ag-center-cols-container .ag-row[row-index="${rowIndex}"] [col-id="${colId}"]`);
+        if (cell) return cell;
+
+        // 2. Check all row elements for this row-index
+        const rowEls = document.querySelectorAll(`.ag-row[row-index="${rowIndex}"]`);
+        for (const r of rowEls) {
+            cell = r.querySelector(`[col-id="${colId}"]`);
+            if (cell) return cell;
+        }
+
+        // 3. Fallback: check by col-id directly in table body
+        const allColCells = Array.from(document.querySelectorAll(`[col-id="${colId}"]`));
+        for (const c of allColCells) {
+            const parentRow = c.closest('.ag-row');
+            if (parentRow && parentRow.getAttribute('row-index') === String(rowIndex)) {
+                return c;
+            }
+        }
+
+        return null;
+    }
+
+    async function checkPauseAndStopState() {
+        if (richFillerStopRequested) {
+            console.log('[opt-ext] Процесс остановлен по запросу пользователя.');
+            return false;
+        }
+
+        if (richFillerPaused) {
+            console.log('[opt-ext] Процесс на паузе...');
+            if (richFillerProgress) {
+                richFillerProgress.textContent = `⏸ На паузе (${richFillerProgress.textContent.replace(' ⏸ Пауза', '')})`;
+            }
+            while (richFillerPaused && !richFillerStopRequested) {
+                await sleep(200);
+            }
+            if (richFillerStopRequested) {
+                console.log('[opt-ext] Процесс остановлен во время паузы.');
+                return false;
+            }
+            console.log('[opt-ext] Возобновление работы...');
+        }
+        return true;
+    }
+
+    async function startRichContentProcessing() {
+        if (richFillerRunning) return;
+
+        richFillerRunning = true;
+        richFillerPaused = false;
+        richFillerStopRequested = false;
+
+        richFillerBtn.disabled = true;
+        richFillerBtn.style.opacity = '0.6';
+        richFillerBtn.style.cursor = 'not-allowed';
+
+        // Show Pause and Stop buttons
+        richFillerStopBtn.style.display = 'inline-flex';
+        richFillerStopBtn.textContent = '⏹ Остановить';
+        richFillerStopBtn.disabled = false;
+        richFillerStopBtn.style.opacity = '1';
+
+        richFillerPauseBtn.style.display = 'inline-flex';
+        richFillerPauseBtn.textContent = '⏸ Пауза';
+        richFillerPauseBtn.style.background = 'rgba(217, 119, 6, 0.9)';
+
+        richFillerProgress.style.display = 'block';
+        richFillerProgress.textContent = 'Подготовка очереди...';
+
+        console.log('[opt-ext] Начало динамической обработки очереди Rich-контента с виртуальным скроллингом AG-Grid...');
+
+        const processedIndices = new Set();
+        let iterationCount = 0;
+        let consecutiveFails = 0;
+
+        function getGridViewport() {
+            return document.querySelector('.ag-body-viewport') || 
+                   document.querySelector('.ag-center-cols-viewport') || 
+                   document.querySelector('.ag-scrolls') || window;
+        }
+
+        while (richFillerRunning && !richFillerStopRequested) {
+            if (!(await checkPauseAndStopState())) break;
+            // 1. Scan current DOM for unprocessed row-index attributes
+            const currentRows = Array.from(document.querySelectorAll('.ag-row'));
+            const availableIndices = [];
+
+            currentRows.forEach(r => {
+                const idxStr = r.getAttribute('row-index');
+                if (idxStr !== null) {
+                    const idxNum = parseInt(idxStr, 10);
+                    if (!isNaN(idxNum) && !processedIndices.has(idxNum)) {
+                        availableIndices.push(idxNum);
+                    }
+                }
+            });
+
+            // Sort numeric row indices
+            availableIndices.sort((a, b) => a - b);
+
+            // 2. If no unprocessed rows found in DOM, scroll down to load next virtual batch
+            if (availableIndices.length === 0) {
+                console.log('[opt-ext] Не найдено новых строк в области видимости. Скроллим таблицу вниз...');
+                const lastRow = document.querySelector('.ag-center-cols-container .ag-row:last-child') || document.querySelector('.ag-row:last-child');
+                if (lastRow) {
+                    lastRow.scrollIntoView({ block: 'end', behavior: 'instant' });
+                } else {
+                    const vp = getGridViewport();
+                    if (vp.scrollBy) vp.scrollBy(0, 400);
+                }
+
+                await sleep(350);
+
+                // Re-scan DOM after scroll
+                const newRows = Array.from(document.querySelectorAll('.ag-row'));
+                const newIndices = [];
+                newRows.forEach(r => {
+                    const idxStr = r.getAttribute('row-index');
+                    if (idxStr !== null) {
+                        const idxNum = parseInt(idxStr, 10);
+                        if (!isNaN(idxNum) && !processedIndices.has(idxNum)) {
+                            newIndices.push(idxNum);
+                        }
+                    }
+                });
+
+                if (newIndices.length === 0) {
+                    consecutiveFails++;
+                    console.log(`[opt-ext] Проверка подгрузки строк (${consecutiveFails}/3): новые строки не появились.`);
+                    if (consecutiveFails >= 3) {
+                        console.log(`[opt-ext] Достигнут конец таблицы. Всего обработано строк: ${processedIndices.size}.`);
+                        break;
+                    }
+                    await sleep(400);
+                    continue;
+                } else {
+                    consecutiveFails = 0;
+                    availableIndices.push(...newIndices.sort((a, b) => a - b));
+                }
+            }
+
+            const nextIdx = availableIndices[0];
+            if (nextIdx === undefined) break;
+
+            iterationCount++;
+            processedIndices.add(nextIdx);
+
+            richFillerProgress.textContent = `Обработано: ${processedIndices.size} товаров (строка #${nextIdx + 1})`;
+            console.log(`[opt-ext] Итерация #${iterationCount}: обработка row-index="${nextIdx}"...`);
+
+            try {
+                await processSingleRowByIndex(nextIdx, iterationCount, processedIndices.size);
+            } catch (err) {
+                console.error(`[opt-ext] Ошибка при обработке row-index=${nextIdx}:`, err);
+            }
+        }
+
+        console.log(`[opt-ext] Массовое заполнение Rich-контента завершено! Всего обработано строк: ${processedIndices.size}.`);
+
+        richFillerRunning = false;
+        richFillerPaused = false;
+        richFillerStopRequested = false;
+
+        richFillerBtn.disabled = false;
+        richFillerBtn.style.opacity = '1';
+        richFillerBtn.style.cursor = 'pointer';
+
+        // Hide Pause and Stop buttons
+        richFillerStopBtn.style.display = 'none';
+        richFillerPauseBtn.style.display = 'none';
+
+        setTimeout(() => {
+            if (!richFillerRunning && richFillerProgress) {
+                richFillerProgress.style.display = 'none';
+            }
+        }, 4000);
+    }
+
+    async function processSingleRowByIndex(rowIndex, index, total) {
+        // 1. Find any row container for this row-index to scroll into view
+        let rowEl = document.querySelector(`.ag-center-cols-container .ag-row[row-index="${rowIndex}"]`) || 
+                    document.querySelector(`.ag-row[row-index="${rowIndex}"]`);
+
+        if (!rowEl) {
+            const anyRow = document.querySelector('.ag-row');
+            if (anyRow) anyRow.scrollIntoView({ block: 'center' });
+            await sleep(150);
+            rowEl = document.querySelector(`.ag-row[row-index="${rowIndex}"]`);
+        }
+
+        if (!rowEl) {
+            console.error(`[opt-ext] Строка ${index}/${total}: .ag-row[row-index="${rowIndex}"] не найден в DOM.`);
+            return;
+        }
+
+        // 2. Scroll row into view center vertically
+        rowEl.scrollIntoView({ block: 'center', behavior: 'instant' });
+        await sleep(100);
+
+        // 3. Find annotation cell across containers
+        let annotationCell = await scrollAndFindCell(rowIndex, COL_ID_ANNOTATION);
+
+        if (!annotationCell) {
+            console.log(`[opt-ext] Строка ${index}/${total} (row-index=${rowIndex}): ячейка аннотации [col-id="${COL_ID_ANNOTATION}"] не найдена.`);
+            return;
+        }
+
+        const cellVal = annotationCell.querySelector('.ag-cell-value') || annotationCell;
+        const rawAnnotation = cellVal.innerHTML || cellVal.textContent || '';
+        const annotationText = cleanRichContentText(rawAnnotation);
+
+        if (!annotationText) {
+            console.log(`[opt-ext] Строка ${index}/${total} (row-index=${rowIndex}): аннотация пустая. Пропуск.`);
+            return;
+        }
+
+        console.log(`[opt-ext] Строка ${index}/${total} (row-index=${rowIndex}): найдена аннотация (${annotationText.length} символов).`);
+
+        // 3b. Extract Brand from [col-id="attribute#85"]
+        let brandText = '';
+        let brandCell = await scrollAndFindCell(rowIndex, COL_ID_BRAND);
+        if (brandCell) {
+            const brandValEl = brandCell.querySelector('.dn0-o4c') || brandCell.querySelector('.dn0-c1p') || brandCell.querySelector('.ag-cell-value') || brandCell;
+            brandText = (brandValEl.textContent || '').trim();
+        }
+        console.log(`[opt-ext] Строка ${index}/${total}: бренд = "${brandText}"`);
+
+        // 3c. Extract Model from [col-id="attribute#9048"]
+        let modelText = '';
+        let modelCell = await scrollAndFindCell(rowIndex, COL_ID_MODEL);
+        if (modelCell) {
+            const modelValEl = modelCell.querySelector('.dn0-c1p') || modelCell.querySelector('.dn0-o4c') || modelCell.querySelector('.ag-cell-value') || modelCell;
+            let rawModel = (modelValEl.textContent || '').trim();
+            // Remove underscore and everything after it
+            const underscoreIdx = rawModel.indexOf('_');
+            if (underscoreIdx !== -1) {
+                rawModel = rawModel.substring(0, underscoreIdx).trim();
+            }
+            modelText = rawModel;
+        }
+        console.log(`[opt-ext] Строка ${index}/${total}: модель = "${modelText}"`);
+
+        // 3d. Build product title from Brand + Model
+        const productTitle = cleanRichContentText([brandText, modelText].filter(Boolean).join(' ')) || 'Товар';
+
+        // 4. Find Rich-content cell across containers
+        let richCell = await scrollAndFindCell(rowIndex, COL_ID_RICH_CONTENT);
+
+        if (!richCell) {
+            console.error(`[opt-ext] Строка ${index}/${total} (row-index=${rowIndex}): ячейка Rich-контента [col-id="${COL_ID_RICH_CONTENT}"] не найдена.`);
+            return;
+        }
+
+        // Target .ag-cell-value inside Rich-content cell
+        console.log(`[opt-ext] Строка ${index}/${total}: подготовка к двойному клику по ячейке Rich-контента...`);
+        await triggerCellDblClick(richCell);
+
+        // 6. Wait for modal "Добавление Rich-контента"
+        const modalFound = await waitForModalByTitle('Rich-контент', 3000);
+        if (!modalFound) {
+            console.error(`[opt-ext] Строка ${index}/${total}: модалка "Добавление Rich-контента" не появилась за 3 сек. Пропуск.`);
+            return;
+        }
+
+        const modal = findModalByTitle('Rich-контент');
+        if (!modal) {
+            console.error(`[opt-ext] Строка ${index}/${total}: узел модалки не найден.`);
+            return;
+        }
+
+        // 7. Find JSON Textarea inside modal (with async retry loop)
+        const textarea = await waitForRichContentTextarea(modal, 2500);
+        if (!textarea) {
+            console.error(`[opt-ext] Строка ${index}/${total}: textarea для JSON не найдена в модалке за 2.5 сек.`);
+            return;
+        }
+
+        // 8. Build Rich-content JSON payload
+        const jsonPayload = {
+            "content": [
+                {
+                    "widgetName": "raTextBlock",
+                    "title": {
+                        "items": [{ "type": "text", "content": productTitle }],
+                        "size": "size5",
+                        "color": "color1"
+                    },
+                    "theme": "primary",
+                    "padding": "type2",
+                    "gapSize": "m",
+                    "text": {
+                        "size": "size2",
+                        "align": "left",
+                        "color": "color1",
+                        "items": [
+                            { "type": "text", "content": annotationText }
+                        ]
+                    }
+                }
+            ],
+            "version": 0.3
+        };
+
+        const jsonString = JSON.stringify(jsonPayload, null, 2);
+
+        // 9. Inject JSON into textarea via native setter
+        console.log(`[opt-ext] Строка ${index}/${total}: вставка JSON в textarea...`);
+        setNativeValue(textarea, jsonString);
+        await sleep(300);
+
+        // 10. Find and click "Применить" button (with async retry loop)
+        const applyBtn = await waitForModalButton(modal, 'Применить', 2500);
+        if (!applyBtn) {
+            console.error(`[opt-ext] Строка ${index}/${total}: кнопка "Применить" не найдена за 2.5 сек.`);
+            return;
+        }
+
+        console.log(`[opt-ext] Строка ${index}/${total}: нажатие кнопки "Применить"...`);
+        applyBtn.click();
+
+        // 11. Wait for modal close
+        await waitForModalClose(modal, 2500);
+
+        // Check pause or stop immediately after apply and modal close (during the 1 sec pause)
+        if (richFillerPaused || richFillerStopRequested) {
+            console.log(`[opt-ext] Строка ${index}/${total}: сохранена. Проверка статуса паузы/остановки...`);
+        }
+        await checkPauseAndStopState();
+
+        await sleep(1000);
+
+        // Second check after the 1 second pause before proceeding to next row
+        await checkPauseAndStopState();
+
+        console.log(`[opt-ext] Строка ${index}/${total}: успешно обработана.`);
+    }
+
+    async function scrollAndFindCell(rowIndex, colId) {
+        // 1. Try direct query first (cell already in DOM)
+        let cell = findCellInGridRow(rowIndex, colId);
+        if (cell) return cell;
+
+        // 2. Find the horizontal scroll viewport (AG-Grid syncs header + body through this)
+        const hScrollVP = document.querySelector('.ag-body-horizontal-scroll-viewport') ||
+                          document.querySelector('.ag-center-cols-viewport');
+
+        if (!hScrollVP) {
+            console.log(`[opt-ext] scrollAndFindCell: горизонтальный скролл-вьюпорт не найден.`);
+            return null;
+        }
+
+        // 3. Determine target scroll position from header cell's left offset
+        // AG-Grid header cells have style="left: Npx" or transform with translateX
+        const headerCell = document.querySelector(`.ag-header-cell[col-id="${colId}"]`);
+        let targetLeft = -1;
+
+        if (headerCell) {
+            // Try reading 'left' from style
+            const leftStyle = headerCell.style.left;
+            if (leftStyle) {
+                targetLeft = parseInt(leftStyle, 10);
+            }
+            // Fallback: try reading from computed transform  
+            if (targetLeft <= 0) {
+                const transform = window.getComputedStyle(headerCell).transform;
+                if (transform && transform !== 'none') {
+                    const match = transform.match(/matrix.*,\s*([\d.]+)\)/);
+                    if (match) targetLeft = parseFloat(match[1]);
+                }
+            }
+        }
+
+        // 4. If we couldn't find header, search in column definitions or guess from other cells
+        if (targetLeft < 0) {
+            // Try to find any cell with this col-id anywhere in DOM to get its left offset
+            const anyCell = document.querySelector(`[col-id="${colId}"]`);
+            if (anyCell) {
+                const leftStyle = anyCell.style.left;
+                if (leftStyle) targetLeft = parseInt(leftStyle, 10);
+            }
+        }
+
+        if (targetLeft >= 0) {
+            // Center the column in the viewport
+            const vpWidth = hScrollVP.clientWidth;
+            const scrollTarget = Math.max(0, targetLeft - vpWidth / 2 + 100);
+            
+            console.log(`[opt-ext] scrollAndFindCell: скролл к col-id="${colId}" (left=${targetLeft}px, scrollTo=${scrollTarget}px)`);
+            hScrollVP.scrollLeft = scrollTarget;
+            await sleep(300);
+
+            cell = findCellInGridRow(rowIndex, colId);
+            if (cell) return cell;
+
+            // Try exact position
+            hScrollVP.scrollLeft = targetLeft;
+            await sleep(300);
+            cell = findCellInGridRow(rowIndex, colId);
+            if (cell) return cell;
+        }
+
+        // 5. Fallback: sweep scroll through entire grid width to find the column
+        const totalWidth = hScrollVP.scrollWidth;
+        const vpWidth = hScrollVP.clientWidth;
+        const step = vpWidth * 0.7; // overlap 30%
+
+        console.log(`[opt-ext] scrollAndFindCell: начинаю sweep-скролл (totalWidth=${totalWidth}, step=${step}) для col-id="${colId}"...`);
+        
+        for (let pos = 0; pos < totalWidth; pos += step) {
+            hScrollVP.scrollLeft = pos;
+            await sleep(250);
+            cell = findCellInGridRow(rowIndex, colId);
+            if (cell) {
+                console.log(`[opt-ext] scrollAndFindCell: найдена ячейка col-id="${colId}" на scrollLeft=${pos}px`);
+                return cell;
+            }
+        }
+
+        console.log(`[opt-ext] scrollAndFindCell: ячейка [col-id="${colId}"] для row-index=${rowIndex} не найдена после полного sweep-скролла.`);
+        return null;
+    }
+    async function triggerCellDblClick(richCell) {
+        // Scroll cell into center both horizontally and vertically
+        richCell.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+        await sleep(200);
+
+        // Find target inner element or fallback to richCell container
+        const innerTextEl = richCell.querySelector('.dn0-c1p') || richCell.querySelector('[class*="-c1p"]') || richCell.querySelector('.ag-cell-value') || richCell;
+
+        function singleClick(target) {
+            const rect = target.getBoundingClientRect();
+            const opts = {
+                bubbles: true,
+                cancelable: true,
+                view: window,
+                clientX: rect.left + rect.width / 2,
+                clientY: rect.top + rect.height / 2,
+                detail: 1
+            };
+            target.dispatchEvent(new MouseEvent('mousedown', opts));
+            target.dispatchEvent(new MouseEvent('mouseup', opts));
+            target.dispatchEvent(new MouseEvent('click', opts));
+        }
+
+        // Click 1: focus cell (causes ag-cell-focus class)
+        console.log('[opt-ext] Клик 1: фокус на ячейку Rich-контента...');
+        singleClick(innerTextEl);
+        if (typeof richCell.focus === 'function') richCell.focus();
+        if (typeof innerTextEl.focus === 'function') innerTextEl.focus();
+
+        // Wait for AG Grid cell focus state to update
+        await sleep(250);
+
+        // Click 2: click focused cell to open modal
+        console.log('[opt-ext] Клик 2: открытие модалки на сфокусированной ячейке...');
+        singleClick(innerTextEl);
+
+        // Check if modal opens within 600ms
+        const modalOpened = await waitForModalByTitle('Rich-контент', 600);
+        if (!modalOpened) {
+            console.log('[opt-ext] Фолбэк клик 2 по родителю [col-id]...');
+            singleClick(richCell);
+            richCell.click?.();
+        }
+    }
+
+    function findModalByTitle(titleText) {
+        const lowerTarget = titleText.toLowerCase();
+
+        const elements = Array.from(document.querySelectorAll('div, section, dialog, [role="dialog"]'));
+        for (const el of elements) {
+            if (!el.textContent) continue;
+            const txt = el.textContent.toLowerCase();
+            if (txt.includes(lowerTarget) || txt.includes('добавление rich-контента') || txt.includes('rich-контент')) {
+                const style = window.getComputedStyle(el);
+                if ((style.position === 'fixed' || style.position === 'absolute' || el.getAttribute('role') === 'dialog') && style.display !== 'none' && style.visibility !== 'hidden' && el.offsetHeight > 0) {
+                    return el;
+                }
+            }
+        }
+
+        const labels = Array.from(document.querySelectorAll('label'));
+        const jsonLabel = labels.find(l => l.textContent && l.textContent.toLowerCase().includes('rich-контент json'));
+        if (jsonLabel) {
+            let parent = jsonLabel.parentElement;
+            while (parent && parent !== document.body) {
+                const style = window.getComputedStyle(parent);
+                if (style.position === 'fixed' || style.position === 'absolute' || parent.getAttribute('role') === 'dialog') {
+                    return parent;
+                }
+                parent = parent.parentElement;
+            }
+            return jsonLabel.closest('div');
+        }
+
+        return null;
+    }
+
+    function waitForModalByTitle(titleText, timeoutMs) {
+        return new Promise((resolve) => {
+            const start = Date.now();
+            const interval = setInterval(() => {
+                const modal = findModalByTitle(titleText);
+                if (modal) {
+                    clearInterval(interval);
+                    resolve(true);
+                } else if (Date.now() - start > timeoutMs) {
+                    clearInterval(interval);
+                    resolve(false);
+                }
+            }, 100);
+        });
+    }
+
+    function waitForModalClose(modal, timeoutMs) {
+        return new Promise((resolve) => {
+            const start = Date.now();
+            const interval = setInterval(() => {
+                if (!document.body.contains(modal) || window.getComputedStyle(modal).display === 'none') {
+                    clearInterval(interval);
+                    resolve(true);
+                } else if (Date.now() - start > timeoutMs) {
+                    clearInterval(interval);
+                    resolve(false);
+                }
+            }, 100);
+        });
+    }
+
+    function waitForRichContentTextarea(modal, timeoutMs = 2000) {
+        return new Promise((resolve) => {
+            const start = Date.now();
+            const timer = setInterval(() => {
+                const searchRoot = (modal && document.body.contains(modal)) ? modal : document;
+                const labels = Array.from(searchRoot.querySelectorAll('label'));
+                const label = labels.find(l => l.textContent && l.textContent.toLowerCase().includes('rich-контент json'));
+                
+                if (label) {
+                    const htmlFor = label.getAttribute('for');
+                    if (htmlFor) {
+                        const el = document.getElementById(htmlFor);
+                        if (el && el.tagName.toLowerCase() === 'textarea') {
+                            clearInterval(timer);
+                            return resolve(el);
+                        }
+                    }
+                    const parentContainer = label.closest('[class*="ct6134"]') || label.parentElement?.parentElement;
+                    if (parentContainer) {
+                        const ta = parentContainer.querySelector('textarea');
+                        if (ta) {
+                            clearInterval(timer);
+                            return resolve(ta);
+                        }
+                    }
+                }
+
+                if (modal) {
+                    const modalTa = modal.querySelector('textarea');
+                    if (modalTa) {
+                        clearInterval(timer);
+                        return resolve(modalTa);
+                    }
+                }
+
+                const globalTa = document.querySelector('textarea');
+                if (globalTa) {
+                    clearInterval(timer);
+                    return resolve(globalTa);
+                }
+
+                if (Date.now() - start > timeoutMs) {
+                    clearInterval(timer);
+                    resolve(null);
+                }
+            }, 100);
+        });
+    }
+
+    function waitForModalButton(modal, btnText, timeoutMs = 2500) {
+        return new Promise((resolve) => {
+            const start = Date.now();
+            const lowerText = btnText.toLowerCase();
+            const timer = setInterval(() => {
+                if (modal && document.body.contains(modal)) {
+                    const modalBtns = Array.from(modal.querySelectorAll('button'));
+                    const foundInModal = modalBtns.find(b => b.textContent && b.textContent.toLowerCase().includes(lowerText));
+                    if (foundInModal) {
+                        clearInterval(timer);
+                        return resolve(foundInModal);
+                    }
+                }
+
+                const allBtns = Array.from(document.querySelectorAll('button'));
+                const foundGlobal = allBtns.find(b => b.textContent && b.textContent.toLowerCase().includes(lowerText));
+                if (foundGlobal) {
+                    clearInterval(timer);
+                    return resolve(foundGlobal);
+                }
+
+                if (Date.now() - start > timeoutMs) {
+                    clearInterval(timer);
+                    resolve(null);
+                }
+            }, 100);
+        });
+    }
+
+    // =========================================================================
+    // Router & SPA URL Observer
+    // =========================================================================
+
+    function routePage() {
+        const href = window.location.href;
+        if (href.includes('/app/products/edit/') || href.includes('behavior=bulk_extended') || href.includes('/products/edit/')) {
+            initRichContentBulkFiller();
+        } else if (href.includes('/app/reviews')) {
+            initReviewsAutoReply();
+        }
+    }
+
+    routePage();
+
+    let lastLocation = window.location.href;
+    setInterval(() => {
+        if (window.location.href !== lastLocation) {
+            lastLocation = window.location.href;
+            routePage();
+        }
+    }, 1000);
+
 })();

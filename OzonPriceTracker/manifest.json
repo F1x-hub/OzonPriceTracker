@@ -33,7 +33,8 @@
     },
     {
       "matches": [
-        "https://seller.ozon.ru/app/reviews*"
+        "https://seller.ozon.ru/app/reviews*",
+        "https://seller.ozon.ru/app/products/edit/*"
       ],
       "js": [
         "seller_content.js"
