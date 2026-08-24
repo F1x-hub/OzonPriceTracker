@@ -413,6 +413,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // Load settings and templates initially
     loadReplySettings();
     loadReplyTemplates();
+    notifySellerReviewsTab();
 
     // Toggle delay inputs visibility
     delayEnabledCheck.addEventListener('change', () => {
@@ -480,6 +481,7 @@ document.addEventListener('DOMContentLoaded', () => {
             chrome.storage.local.set({ ozonReplyTemplates: templates }, () => {
                 resetTemplateForm();
                 loadReplyTemplates();
+                notifySellerReviewsTab();
             });
         });
     });
@@ -497,6 +499,17 @@ document.addEventListener('DOMContentLoaded', () => {
     function loadReplyTemplates() {
         chrome.storage.local.get({ ozonReplyTemplates: [] }, (result) => {
             renderReplyTemplates(result.ozonReplyTemplates);
+        });
+    }
+
+    function notifySellerReviewsTab() {
+        chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+            const tab = tabs && tabs[0];
+            if (!tab || !tab.id || !tab.url || !tab.url.includes('seller.ozon.ru/app/reviews')) return;
+
+            chrome.tabs.sendMessage(tab.id, { action: 'refreshReplyTemplates' }, () => {
+                void chrome.runtime.lastError;
+            });
         });
     }
 
@@ -544,6 +557,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const filtered = result.ozonReplyTemplates.filter(t => t.id !== id);
             chrome.storage.local.set({ ozonReplyTemplates: filtered }, () => {
                 loadReplyTemplates();
+                notifySellerReviewsTab();
                 // If editing deleted template, reset form
                 if (templateIdInput.value === id) {
                     resetTemplateForm();

@@ -33,6 +33,15 @@
     },
     {
       "matches": [
+        "https://www.ozon.ru/product/*"
+      ],
+      "js": [
+        "ozon_content.js"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
         "https://seller.ozon.ru/app/reviews*",
         "https://seller.ozon.ru/app/products/edit/*"
       ],
@@ -40,6 +49,18 @@
         "seller_content.js"
       ],
       "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "ozon_widget.css",
+        "seller_widget.css"
+      ],
+      "matches": [
+        "https://www.ozon.ru/*",
+        "https://seller.ozon.ru/*"
+      ]
     }
   ]
 }

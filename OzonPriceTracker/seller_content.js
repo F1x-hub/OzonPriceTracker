@@ -83,9 +83,15 @@
     // MODULE 1: Reviews Auto-Reply (seller.ozon.ru/app/reviews*)
     // =========================================================================
 
+    const DEFAULT_REPLY_TEMPLATE = Object.freeze({
+        id: '__default_all_selected_reviews__',
+        title: 'Ответить на все выбранные отзывы',
+        text: 'Благодарим за обратную связь!'
+    });
+
     let rowStates = new Map();
     let overlayElements = new Map();
-    let savedTemplates = [];
+    let savedTemplates = [DEFAULT_REPLY_TEMPLATE];
     let replySettings = { delayEnabled: false, minDelay: 2, maxDelay: 5 };
     let isRunning = false;
     let failedReplies = [];
@@ -98,14 +104,27 @@
 
     let floatBtnContainer = null;
     let floatBtn = null;
+    let selectionSummary = null;
+
+    function normalizeReplyTemplates(templates) {
+        return Array.isArray(templates) && templates.length > 0
+            ? templates
+            : [DEFAULT_REPLY_TEMPLATE];
+    }
+
+    function refreshReplyTemplatesFromStorage() {
+        chrome.storage.local.get(['ozonReplyTemplates'], (result) => {
+            savedTemplates = normalizeReplyTemplates(result.ozonReplyTemplates);
+            updateAllDropdowns();
+            requestReposition();
+        });
+    }
 
     function initReviewsAutoReply() {
         if (document.getElementById('opt-ext-float-container')) return;
 
         chrome.storage.local.get(['ozonReplyTemplates', 'ozonReplySettings'], (result) => {
-            if (result.ozonReplyTemplates) {
-                savedTemplates = result.ozonReplyTemplates;
-            }
+            savedTemplates = normalizeReplyTemplates(result.ozonReplyTemplates);
             if (result.ozonReplySettings) {
                 replySettings = result.ozonReplySettings;
             }
@@ -116,9 +135,7 @@
     chrome.storage.onChanged.addListener((changes, namespace) => {
         if (namespace === 'local') {
             if (changes.ozonReplyTemplates) {
-                savedTemplates = changes.ozonReplyTemplates.newValue || [];
-                updateAllDropdowns();
-                requestReposition();
+                refreshReplyTemplatesFromStorage();
             }
             if (changes.ozonReplySettings) {
                 replySettings = changes.ozonReplySettings.newValue || { delayEnabled: false, minDelay: 2, maxDelay: 5 };
@@ -126,8 +143,26 @@
         }
     });
 
+    chrome.runtime.onMessage.addListener((message) => {
+        if (message && message.action === 'refreshReplyTemplates') {
+            refreshReplyTemplatesFromStorage();
+        }
+    });
+
+    function injectSellerStyles() {
+        if (document.getElementById('opt-ext-seller-styles')) return;
+
+        const styleLink = document.createElement('link');
+        styleLink.id = 'opt-ext-seller-styles';
+        styleLink.rel = 'stylesheet';
+        styleLink.href = chrome.runtime.getURL('seller_widget.css');
+        (document.head || document.documentElement).appendChild(styleLink);
+    }
+
     function initReviewsUI() {
         if (document.getElementById('opt-ext-float-container')) return;
+
+        injectSellerStyles();
 
         // 1. Floating panel
         floatBtnContainer = document.createElement('div');
@@ -142,6 +177,23 @@
             gap: 10px;
             font-family: 'Inter', system-ui, -apple-system, sans-serif;
         `;
+
+        const panelHeader = document.createElement('div');
+        panelHeader.className = 'opt-ext-panel-header';
+
+        const panelTitle = document.createElement('div');
+        panelTitle.className = 'opt-ext-panel-title';
+        panelTitle.textContent = 'Ассистент отзывов';
+
+        const panelBadge = document.createElement('span');
+        panelBadge.className = 'opt-ext-panel-badge';
+        panelBadge.textContent = 'OZON';
+
+        panelHeader.append(panelTitle, panelBadge);
+
+        selectionSummary = document.createElement('div');
+        selectionSummary.id = 'opt-ext-selection-summary';
+        selectionSummary.textContent = 'Выбрано: 0 · Готово: 0';
 
         floatBtn = document.createElement('button');
         floatBtn.id = 'opt-ext-submit-btn';
@@ -161,14 +213,13 @@
         `;
 
         floatBtn.addEventListener('click', handleFloatBtnClick);
-        floatBtnContainer.appendChild(floatBtn);
+        floatBtnContainer.append(panelHeader, selectionSummary, floatBtn);
         document.body.appendChild(floatBtnContainer);
 
         // 2. Overlay container
         overlayContainer = document.createElement('div');
         overlayContainer.id = 'opt-ext-checkbox-overlay';
         overlayContainer.style.cssText = 'position: absolute; top: 0; left: 0; width: 0; height: 0; overflow: visible; z-index: 9998; pointer-events: none;';
-        document.body.appendChild(overlayContainer);
 
         // 3. Select-all checkbox wrapper
         checkAllWrapper = document.createElement('div');
@@ -210,10 +261,31 @@
 
         // Observe DOM changes
         observer = new MutationObserver((mutations) => {
+            const extensionSelector = [
+                '#opt-ext-float-container',
+                '#opt-ext-checkbox-overlay',
+                '#opt-ext-check-all-wrapper',
+                '#opt-ext-bulk-select-wrapper',
+                '.opt-ext-checkbox-wrapper',
+                '.opt-ext-select-wrapper',
+                '.opt-ext-panel-header',
+                '#opt-ext-selection-summary',
+                '[data-opt-ext-reply-column]'
+            ].join(',');
+
             const hasExternalMutations = mutations.some(mut => {
                 const target = mut.target;
-                if (!target || typeof target.closest !== 'function') return true;
-                return !target.closest('#opt-ext-checkbox-overlay') && !target.closest('#opt-ext-float-container');
+                if (target && typeof target.closest === 'function' && target.closest(extensionSelector)) {
+                    return false;
+                }
+
+                const changedNodes = [
+                    ...Array.from(mut.addedNodes || []),
+                    ...Array.from(mut.removedNodes || [])
+                ];
+                return changedNodes.length === 0 || changedNodes.some(node => (
+                    node.nodeType === 1 && !node.matches(extensionSelector)
+                ));
             });
             if (hasExternalMutations) {
                 detectColumnIndices();
@@ -229,6 +301,15 @@
 
     function updateFloatBtn() {
         if (!floatBtn) return;
+
+        const selectedCount = Array.from(rowStates.values())
+            .filter(state => state.checked).length;
+        const queueCount = getQueueItems().length;
+        if (selectionSummary) {
+            selectionSummary.textContent = queueCount > 0
+                ? `Выбрано: ${selectedCount} · Готово к отправке: ${queueCount}`
+                : `Выбрано: ${selectedCount} · Выберите шаблон`;
+        }
 
         if (isRunning) {
             floatBtn.textContent = 'Остановить';
@@ -333,7 +414,7 @@
                 
                 if (text === 'отзыв') {
                     reviewColIndex = currentCellIndex;
-                } else if (text === 'ответы' || text === 'ответ') {
+                } else if (text.startsWith('ответы') || text.startsWith('ответ')) {
                     repliesColIndex = currentCellIndex;
                 } else if (text === 'название товара' || text === 'товар') {
                     productColIndex = currentCellIndex;
@@ -344,6 +425,58 @@
                 currentCellIndex += colspan;
             });
         }
+    }
+
+    function ensureExtensionColumn(table) {
+        if (!table || repliesColIndex === -1) return;
+
+        const colgroup = table.querySelector('colgroup');
+        if (colgroup && !colgroup.querySelector('col[data-opt-ext-reply-column]')) {
+            const extensionCol = document.createElement('col');
+            extensionCol.setAttribute('data-opt-ext-reply-column', 'true');
+            extensionCol.style.width = '190px';
+            const nextCol = colgroup.children[repliesColIndex + 1] || null;
+            colgroup.insertBefore(extensionCol, nextCol);
+        }
+    }
+
+    function ensureExtensionHeaderCell(headerTable) {
+        if (!headerTable) return null;
+
+        let extensionTh = headerTable.querySelector('thead th[data-opt-ext-reply-column]');
+        if (extensionTh) return extensionTh;
+
+        const headerCells = Array.from(headerTable.querySelectorAll('thead th'));
+        const repliesTh = headerCells.find(th => (
+            th.textContent.trim().toLowerCase().startsWith('ответы')
+        ));
+        if (!repliesTh) return null;
+
+        extensionTh = document.createElement('th');
+        extensionTh.setAttribute('data-opt-ext-reply-column', 'true');
+        extensionTh.className = 'opt-ext-reply-column';
+        extensionTh.setAttribute('aria-label', 'Шаблон ответа');
+        repliesTh.insertAdjacentElement('afterend', extensionTh);
+        return extensionTh;
+    }
+
+    function ensureExtensionRowCell(row) {
+        if (!row) return null;
+
+        let extensionTd = row.querySelector('td[data-opt-ext-reply-column]');
+        if (extensionTd) return extensionTd;
+
+        const cells = row.querySelectorAll('td');
+        const repliesTd = repliesColIndex !== -1
+            ? cells[repliesColIndex]
+            : cells[cells.length - 1];
+        if (!repliesTd) return null;
+
+        extensionTd = document.createElement('td');
+        extensionTd.setAttribute('data-opt-ext-reply-column', 'true');
+        extensionTd.className = 'opt-ext-reply-column';
+        repliesTd.insertAdjacentElement('afterend', extensionTd);
+        return extensionTd;
     }
 
     function requestReposition() {
@@ -358,6 +491,10 @@
     function repositionOverlay() {
         const headerTable = findHeaderTable();
         const rowsTable = findRowsTable();
+
+        detectColumnIndices();
+        ensureExtensionColumn(headerTable);
+        ensureExtensionColumn(rowsTable);
         
         if (rowsTable) {
             registerScrollParentListener(rowsTable);
@@ -372,40 +509,17 @@
             return;
         }
 
-        const firstTh = headerTable ? headerTable.querySelector('thead th') : null;
-        if (firstTh && checkAllWrapper && bulkSelectWrapper) {
-            const thRect = firstTh.getBoundingClientRect();
-            const checkWidth = 32;
-            const dropdownWidth = 90;
-            const gap = 6;
-
-            let checkLeft = thRect.left - checkWidth - gap + window.scrollX;
-            if (checkLeft < window.scrollX) {
-                checkLeft = thRect.right + window.scrollX;
+        const extensionTh = ensureExtensionHeaderCell(headerTable);
+        if (extensionTh && checkAllWrapper && bulkSelectWrapper) {
+            if (checkAllWrapper.parentElement !== extensionTh) {
+                extensionTh.appendChild(checkAllWrapper);
+            }
+            if (bulkSelectWrapper.parentElement !== extensionTh) {
+                extensionTh.appendChild(bulkSelectWrapper);
             }
 
-            checkAllWrapper.style.left = `${checkLeft}px`;
-            checkAllWrapper.style.top = `${thRect.top + window.scrollY}px`;
-            checkAllWrapper.style.width = `${checkWidth}px`;
-            checkAllWrapper.style.height = `${thRect.height}px`;
-            checkAllWrapper.style.display = 'flex';
-            checkAllWrapper.style.cssText += `
-                align-items: center;
-                justify-content: center;
-                background: #e3efff;
-                border-right: 1px dashed #c0d6ff;
-            `;
-
-            const dropdownLeft = checkLeft + checkWidth + gap;
-            bulkSelectWrapper.style.left = `${dropdownLeft}px`;
-            bulkSelectWrapper.style.top = `${thRect.top + window.scrollY}px`;
-            bulkSelectWrapper.style.width = `${dropdownWidth}px`;
-            bulkSelectWrapper.style.height = `${thRect.height}px`;
-            bulkSelectWrapper.style.display = 'flex';
-            bulkSelectWrapper.style.cssText += `
-                align-items: center;
-                justify-content: center;
-            `;
+            checkAllWrapper.style.display = 'inline-flex';
+            bulkSelectWrapper.style.display = 'inline-flex';
         } else {
             if (checkAllWrapper) checkAllWrapper.style.display = 'none';
             if (bulkSelectWrapper) bulkSelectWrapper.style.display = 'none';
@@ -464,33 +578,19 @@
                     select.disabled = !state.checked;
                 }
 
-                if (firstTd) {
-                    const firstTdRect = firstTd.getBoundingClientRect();
-                    const checkWidth = 40;
-                    const gap = 8;
-                    let checkLeft = firstTdRect.left - checkWidth - gap + window.scrollX;
-                    if (checkLeft < window.scrollX) {
-                        checkLeft = firstTdRect.right + window.scrollX;
+                const extensionTd = ensureExtensionRowCell(tr);
+                if (extensionTd) {
+                    if (elPair.checkWrapper.parentElement !== extensionTd) {
+                        extensionTd.appendChild(elPair.checkWrapper);
                     }
-                    elPair.checkWrapper.style.left = `${checkLeft}px`;
-                    elPair.checkWrapper.style.top = `${firstTdRect.top + window.scrollY}px`;
-                    elPair.checkWrapper.style.width = `${checkWidth}px`;
-                    elPair.checkWrapper.style.height = `${firstTdRect.height}px`;
-                    elPair.checkWrapper.style.display = 'flex';
-                } else {
-                    elPair.checkWrapper.style.display = 'none';
-                }
+                    elPair.checkWrapper.style.display = 'inline-flex';
 
-                if (lastTd) {
-                    const lastTdRect = lastTd.getBoundingClientRect();
-                    const dropdownWidth = 140;
-                    elPair.selectWrapper.style.left = `${lastTdRect.right - dropdownWidth + window.scrollX}px`;
-                    elPair.selectWrapper.style.top = `${lastTdRect.top + window.scrollY}px`;
-                    elPair.selectWrapper.style.width = `${dropdownWidth}px`;
-                    elPair.selectWrapper.style.height = `${lastTdRect.height}px`;
+                    if (elPair.selectWrapper.parentElement !== extensionTd) {
+                        extensionTd.appendChild(elPair.selectWrapper);
+                    }
 
                     if (rowData.repliesCount > 0) {
-                        elPair.selectWrapper.style.display = 'flex';
+                        elPair.selectWrapper.style.display = 'inline-flex';
                         if (select) select.style.display = 'none';
                         let span = elPair.selectWrapper.querySelector('.opt-ext-replied-span');
                         if (!span) {
@@ -504,7 +604,7 @@
                         let span = elPair.selectWrapper.querySelector('.opt-ext-replied-span');
                         if (span) span.remove();
                         if (select) select.style.display = 'block';
-                        elPair.selectWrapper.style.display = state.checked ? 'flex' : 'none';
+                        elPair.selectWrapper.style.display = state.checked ? 'inline-flex' : 'none';
                     }
                 } else {
                     elPair.selectWrapper.style.display = 'none';
@@ -618,7 +718,11 @@
         }
 
         if (repliesColIndex !== -1 && cells[repliesColIndex]) {
-            const repliesStr = cells[repliesColIndex].textContent.trim();
+            const repliesCellClone = cells[repliesColIndex].cloneNode(true);
+            repliesCellClone.querySelectorAll(
+                '#opt-ext-check-all-wrapper, #opt-ext-bulk-select-wrapper, .opt-ext-checkbox-wrapper, .opt-ext-select-wrapper'
+            ).forEach(el => el.remove());
+            const repliesStr = repliesCellClone.textContent.trim();
             repliesCount = parseInt(repliesStr.replace(/[^\d]/g, ''), 10) || 0;
         }
 
@@ -669,7 +773,7 @@
             const opt = document.createElement('option');
             opt.value = tpl.id;
             opt.textContent = tpl.title;
-            select.appendChild(opt);
+            bulkSelect.appendChild(opt);
         });
         bulkSelect.value = '';
     }
@@ -1005,6 +1109,8 @@
 
     function initRichContentBulkFiller() {
         if (document.getElementById('opt-ext-rich-filler-container')) return;
+
+        injectSellerStyles();
 
         // 1. Create Floating UI Container
         richFillerContainer = document.createElement('div');
