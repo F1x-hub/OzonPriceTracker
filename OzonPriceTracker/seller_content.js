@@ -2135,8 +2135,18 @@
         balanceChip.className = 'opt-ext-ai-balance-chip';
         balanceChip.textContent = 'Баланс...';
 
-        // Read cached balance
-        chrome.storage.local.get(['deepseekLastBalance'], (res) => {
+        // Read configured model and cached balance
+        chrome.storage.local.get(['deepseekModel', 'deepseekLastBalance'], (res) => {
+            const m = (res.deepseekModel || 'deepseek-chat').toLowerCase();
+            let label = 'V3';
+            if (m.includes('reasoner') || m.includes('r1')) label = 'R1';
+            else if (m.includes('v4')) label = 'V4';
+            else if (m.includes('coder')) label = 'CODER';
+            else if (m.includes('v2')) label = 'V2.5';
+            else if (m.startsWith('deepseek-')) label = m.replace('deepseek-', '').toUpperCase();
+            else label = m.toUpperCase().slice(0, 8);
+            badge.textContent = label;
+
             if (res.deepseekLastBalance?.balance_infos?.[0]) {
                 const info = res.deepseekLastBalance.balance_infos[0];
                 const symbol = info.currency === 'CNY' ? '¥' : '$';

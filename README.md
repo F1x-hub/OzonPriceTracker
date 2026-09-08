@@ -14,6 +14,7 @@
 - Add AI assistant card to Ozon question drawer.
 - Add batch answering mode for selected table questions.
 - Add response mode selector to question table headers and rows.
+- Add multi-model support with custom model ID input.
 - Add auto-save for system prompt on blur and input.
 
 ### Fixes

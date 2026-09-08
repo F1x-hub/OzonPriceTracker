@@ -622,9 +622,57 @@ document.addEventListener('DOMContentLoaded', () => {
     const promptChips = document.querySelectorAll('.prompt-chip');
     const deepseekAutoSendCheck = document.getElementById('deepseekAutoSend');
     const deepseekModelSelect = document.getElementById('deepseekModelSelect');
+    const deepseekCustomModelContainer = document.getElementById('deepseekCustomModelContainer');
+    const deepseekCustomModelInput = document.getElementById('deepseekCustomModelInput');
     const deepseekDelayInput = document.getElementById('deepseekDelay');
     const saveAllAiSettingsBtn = document.getElementById('saveAllAiSettingsBtn');
     const aiSettingsSavedMsg = document.getElementById('aiSettingsSavedMsg');
+
+    function getEffectiveModel() {
+        if (!deepseekModelSelect) return 'deepseek-chat';
+        if (deepseekModelSelect.value === 'custom') {
+            return (deepseekCustomModelInput?.value || '').trim() || 'deepseek-chat';
+        }
+        return deepseekModelSelect.value;
+    }
+
+    function updateCustomModelVisibility() {
+        if (!deepseekModelSelect || !deepseekCustomModelContainer) return;
+        if (deepseekModelSelect.value === 'custom') {
+            deepseekCustomModelContainer.style.display = 'flex';
+            if (deepseekCustomModelInput) deepseekCustomModelInput.focus();
+        } else {
+            deepseekCustomModelContainer.style.display = 'none';
+        }
+    }
+
+    if (deepseekModelSelect) {
+        deepseekModelSelect.addEventListener('change', () => {
+            updateCustomModelVisibility();
+            const effectiveModel = getEffectiveModel();
+            chrome.storage.local.set({ deepseekModel: effectiveModel });
+        });
+    }
+
+    if (deepseekCustomModelInput) {
+        let modelTimeout = null;
+        deepseekCustomModelInput.addEventListener('input', () => {
+            if (deepseekModelSelect?.value === 'custom') {
+                clearTimeout(modelTimeout);
+                modelTimeout = setTimeout(() => {
+                    const val = deepseekCustomModelInput.value.trim();
+                    if (val) chrome.storage.local.set({ deepseekModel: val });
+                }, 500);
+            }
+        });
+        deepseekCustomModelInput.addEventListener('blur', () => {
+            if (deepseekModelSelect?.value === 'custom') {
+                clearTimeout(modelTimeout);
+                const val = deepseekCustomModelInput.value.trim();
+                if (val) chrome.storage.local.set({ deepseekModel: val });
+            }
+        });
+    }
 
     // Toggle API Key visibility
     if (toggleApiKeyVisibilityBtn && deepseekApiKeyInput) {
@@ -752,7 +800,7 @@ document.addEventListener('DOMContentLoaded', () => {
         saveAllAiSettingsBtn.addEventListener('click', () => {
             const key = (deepseekApiKeyInput.value || '').trim();
             const prompt = (deepseekSystemPrompt.value || '').trim() || DEFAULT_PROMPT;
-            const model = deepseekModelSelect.value || 'deepseek-chat';
+            const model = getEffectiveModel();
             const autoSend = deepseekAutoSendCheck.checked;
             const delay = parseInt(deepseekDelayInput.value, 10) || 3;
 
@@ -868,7 +916,19 @@ document.addEventListener('DOMContentLoaded', () => {
         }, (res) => {
             if (deepseekApiKeyInput) deepseekApiKeyInput.value = res.deepseekApiKey || '';
             if (deepseekSystemPrompt) deepseekSystemPrompt.value = res.deepseekPrompt || DEFAULT_PROMPT;
-            if (deepseekModelSelect) deepseekModelSelect.value = res.deepseekModel || 'deepseek-chat';
+
+            const storedModel = res.deepseekModel || 'deepseek-chat';
+            const standardModels = ['deepseek-chat', 'deepseek-reasoner', 'deepseek-v3', 'deepseek-coder', 'deepseek-v2.5'];
+
+            if (standardModels.includes(storedModel)) {
+                if (deepseekModelSelect) deepseekModelSelect.value = storedModel;
+                if (deepseekCustomModelContainer) deepseekCustomModelContainer.style.display = 'none';
+            } else {
+                if (deepseekModelSelect) deepseekModelSelect.value = 'custom';
+                if (deepseekCustomModelContainer) deepseekCustomModelContainer.style.display = 'flex';
+                if (deepseekCustomModelInput) deepseekCustomModelInput.value = storedModel;
+            }
+
             if (deepseekAutoSendCheck) deepseekAutoSendCheck.checked = !!res.deepseekAutoSend;
             if (deepseekDelayInput) deepseekDelayInput.value = res.deepseekDelay || 3;
 

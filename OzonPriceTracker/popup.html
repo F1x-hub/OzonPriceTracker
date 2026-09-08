@@ -221,10 +221,18 @@
                 </label>
                 <div style="display: flex; justify-content: space-between; align-items: center; font-size: 12px;">
                     <span>Модель:</span>
-                    <select id="deepseekModelSelect" style="padding: 4px 8px; border-radius: 4px; border: 1px solid #ddd; font-size: 12px;">
-                        <option value="deepseek-chat" selected>deepseek-chat (быстрая V3)</option>
-                        <option value="deepseek-reasoner">deepseek-reasoner (мышление R1)</option>
+                    <select id="deepseekModelSelect" style="padding: 4px 8px; border-radius: 4px; border: 1px solid #ddd; font-size: 12px; max-width: 190px;">
+                        <option value="deepseek-chat" selected>deepseek-chat (DeepSeek-V3)</option>
+                        <option value="deepseek-reasoner">deepseek-reasoner (DeepSeek-R1)</option>
+                        <option value="deepseek-v3">deepseek-v3 (Direct V3)</option>
+                        <option value="deepseek-coder">deepseek-coder (Coder)</option>
+                        <option value="deepseek-v2.5">deepseek-v2.5 (Legacy)</option>
+                        <option value="custom">✏️ Своя модель (указать вручную)</option>
                     </select>
+                </div>
+                <div id="deepseekCustomModelContainer" style="display: none; justify-content: space-between; align-items: center; font-size: 12px;">
+                    <span>ID модели:</span>
+                    <input type="text" id="deepseekCustomModelInput" placeholder="например, deepseek-v4" style="width: 180px; padding: 4px 6px; border-radius: 4px; border: 1px solid #ddd; font-size: 12px;">
                 </div>
                 <div style="display: flex; justify-content: space-between; align-items: center; font-size: 12px;">
                     <span>Задержка между вопросами:</span>
