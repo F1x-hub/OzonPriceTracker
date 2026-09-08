@@ -170,3 +170,225 @@
         transition: none !important;
     }
 }
+
+/* =========================================================================
+   AI QUESTION ASSISTANT (DeepSeek) STYLES
+   ========================================================================= */
+
+.opt-ext-ai-drawer-card {
+    margin: 12px 0 16px 0 !important;
+    padding: 14px !important;
+    border: 1px solid #cfe0ff !important;
+    border-radius: 12px !important;
+    background: linear-gradient(180deg, #f8faff 0%, #ffffff 100%) !important;
+    box-shadow: 0 4px 16px rgba(0, 91, 255, 0.08) !important;
+    font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif !important;
+    box-sizing: border-box !important;
+}
+
+.opt-ext-ai-header {
+    display: flex !important;
+    justify-content: space-between !important;
+    align-items: center !important;
+    margin-bottom: 10px !important;
+}
+
+.opt-ext-ai-title-wrap {
+    display: flex !important;
+    align-items: center !important;
+    gap: 8px !important;
+}
+
+.opt-ext-ai-title {
+    font-size: 13px !important;
+    font-weight: 750 !important;
+    color: #1e293b !important;
+    letter-spacing: -0.01em !important;
+}
+
+.opt-ext-ai-badge {
+    padding: 3px 6px !important;
+    border-radius: 6px !important;
+    background: #005bff !important;
+    color: #ffffff !important;
+    font-size: 10px !important;
+    font-weight: 700 !important;
+    letter-spacing: 0.04em !important;
+}
+
+.opt-ext-ai-balance-chip {
+    font-size: 11px !important;
+    color: #005bff !important;
+    background: #eef4ff !important;
+    padding: 3px 8px !important;
+    border-radius: 10px !important;
+    border: 1px solid #d8e5ff !important;
+    font-weight: 600 !important;
+}
+
+.opt-ext-ai-btn-row {
+    display: flex !important;
+    gap: 8px !important;
+    margin-bottom: 6px !important;
+}
+
+.opt-ext-ai-btn {
+    flex: 1 !important;
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    gap: 6px !important;
+    padding: 8px 12px !important;
+    border-radius: 8px !important;
+    font-size: 12px !important;
+    font-weight: 700 !important;
+    cursor: pointer !important;
+    transition: all 140ms ease-out !important;
+    border: none !important;
+}
+
+.opt-ext-ai-gen-btn {
+    background: linear-gradient(135deg, #005bff 0%, #0045c4 100%) !important;
+    color: #ffffff !important;
+    box-shadow: 0 2px 8px rgba(0, 91, 255, 0.25) !important;
+}
+
+.opt-ext-ai-gen-btn:hover:not(:disabled) {
+    background: linear-gradient(135deg, #004edb 0%, #003aa3 100%) !important;
+    box-shadow: 0 4px 12px rgba(0, 91, 255, 0.35) !important;
+    transform: translateY(-1px) !important;
+}
+
+.opt-ext-ai-gen-btn:active:not(:disabled) {
+    transform: translateY(0) !important;
+}
+
+.opt-ext-ai-gensend-btn {
+    background: #f0fdf4 !important;
+    color: #15803d !important;
+    border: 1px solid #bbf7d0 !important;
+}
+
+.opt-ext-ai-gensend-btn:hover:not(:disabled) {
+    background: #dcfce7 !important;
+    border-color: #86efac !important;
+    transform: translateY(-1px) !important;
+}
+
+.opt-ext-ai-btn:disabled {
+    opacity: 0.55 !important;
+    cursor: not-allowed !important;
+    transform: none !important;
+}
+
+.opt-ext-ai-status {
+    font-size: 11px !important;
+    color: #64748b !important;
+    min-height: 16px !important;
+    display: flex !important;
+    align-items: center !important;
+    gap: 6px !important;
+    line-height: 1.3 !important;
+}
+
+.opt-ext-ai-status.success {
+    color: #15803d !important;
+    font-weight: 600 !important;
+}
+
+.opt-ext-ai-status.error {
+    color: #b91c1c !important;
+    font-weight: 600 !important;
+}
+
+.opt-ext-ai-spinner {
+    width: 12px !important;
+    height: 12px !important;
+    border: 2px solid rgba(0, 91, 255, 0.2) !important;
+    border-top-color: #005bff !important;
+    border-radius: 50% !important;
+    animation: opt-ext-spin 0.8s linear infinite !important;
+    display: inline-block !important;
+}
+
+@keyframes opt-ext-spin {
+    to { transform: rotate(360deg); }
+}
+
+/* Question table column with checkbox & selector */
+.opt-ext-question-th {
+    width: 175px !important;
+    min-width: 175px !important;
+    max-width: 175px !important;
+    text-align: left !important;
+    vertical-align: middle !important;
+    white-space: nowrap !important;
+    box-sizing: border-box !important;
+    padding: 6px 8px !important;
+}
+
+.opt-ext-question-td {
+    width: 175px !important;
+    min-width: 175px !important;
+    max-width: 175px !important;
+    text-align: left !important;
+    vertical-align: middle !important;
+    white-space: nowrap !important;
+    box-sizing: border-box !important;
+    padding: 6px 8px !important;
+}
+
+.opt-ext-question-th-inner,
+.opt-ext-question-td-inner {
+    display: inline-flex !important;
+    align-items: center !important;
+    gap: 7px !important;
+}
+
+.opt-ext-question-select {
+    width: 132px !important;
+    max-width: 132px !important;
+    padding: 4px 6px !important;
+    border: 1px solid #d8e0ee !important;
+    border-radius: 6px !important;
+    background: #ffffff !important;
+    font-size: 11px !important;
+    font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif !important;
+    color: #1e293b !important;
+    outline: none !important;
+    cursor: pointer !important;
+    transition: border-color 140ms ease-out, box-shadow 140ms ease-out !important;
+}
+
+.opt-ext-question-select:focus {
+    border-color: #005bff !important;
+    box-shadow: 0 0 0 2px rgba(0, 91, 255, 0.15) !important;
+}
+
+.opt-ext-question-cb {
+    width: 16px !important;
+    height: 16px !important;
+    cursor: pointer !important;
+    accent-color: #005bff !important;
+    margin: 0 !important;
+}
+
+#opt-ext-questions-float-container {
+    position: fixed !important;
+    bottom: 20px !important;
+    right: 20px !important;
+    z-index: 10000 !important;
+    width: 290px !important;
+    box-sizing: border-box !important;
+    padding: 14px !important;
+    border: 1px solid rgba(0, 91, 255, 0.2) !important;
+    border-radius: 16px !important;
+    background: rgba(255, 255, 255, 0.98) !important;
+    box-shadow: 0 16px 40px rgba(21, 35, 70, 0.18) !important;
+    backdrop-filter: blur(14px) !important;
+    display: flex !important;
+    flex-direction: column !important;
+    gap: 10px !important;
+    font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif !important;
+}
+

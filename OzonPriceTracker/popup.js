@@ -89,6 +89,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
             if (targetId === 'history-tab') {
                 loadHistory();
+            } else if (targetId === 'ai-questions-tab') {
+                loadAiSettings();
             }
         });
     });
@@ -590,4 +592,307 @@ document.addEventListener('DOMContentLoaded', () => {
         };
         return text.replace(/[&<>"']/g, function(m) { return map[m]; });
     }
+
+    // =========================================================================
+    // AI QUESTIONS & DEEPSEEK DASHBOARD
+    // =========================================================================
+
+    const DEFAULT_PROMPT = `Ты — вежливый и компетентный представитель магазина на Ozon. Твоя задача — профессионально ответить на вопрос покупателя о товаре.
+Правила:
+1. Обращайся к покупателю вежливо и по имени (если указано).
+2. Отвечай строго по существу вопроса, помогая принять решение о покупке.
+3. Если вопрос о совместимости (например, подойдет ли пульт к определенной модели техники): поясни, что если модель указана в описании или совпадает с оригинальным пультом, то устройство гарантированно подойдет. Если модель старая или редкая, посоветуй сверить расположение и назначение основных кнопок со старым пультом или задать уточняющий вопрос.
+4. Ответ должен быть лаконичным, уверенным и доброжелательным (2-5 предложений).
+5. Завершай ответ пожеланием приятных покупок или отличного настроения.`;
+
+    const deepseekStatusBadge = document.getElementById('deepseekStatusBadge');
+    const deepseekApiKeyInput = document.getElementById('deepseekApiKey');
+    const toggleApiKeyVisibilityBtn = document.getElementById('toggleApiKeyVisibility');
+    const saveDeepSeekKeyBtn = document.getElementById('saveDeepSeekKeyBtn');
+    const deepseekKeyStatusMsg = document.getElementById('deepseekKeyStatusMsg');
+    const refreshBalanceBtn = document.getElementById('refreshBalanceBtn');
+    const deepseekBalanceValue = document.getElementById('deepseekBalanceValue');
+    const deepseekBalanceRub = document.getElementById('deepseekBalanceRub');
+    const deepseekStatRequests = document.getElementById('deepseekStatRequests');
+    const deepseekStatTokens = document.getElementById('deepseekStatTokens');
+    const deepseekStatCost = document.getElementById('deepseekStatCost');
+    const resetStatsBtn = document.getElementById('resetStatsBtn');
+    const resetPromptBtn = document.getElementById('resetPromptBtn');
+    const deepseekSystemPrompt = document.getElementById('deepseekSystemPrompt');
+    const promptChips = document.querySelectorAll('.prompt-chip');
+    const deepseekAutoSendCheck = document.getElementById('deepseekAutoSend');
+    const deepseekModelSelect = document.getElementById('deepseekModelSelect');
+    const deepseekDelayInput = document.getElementById('deepseekDelay');
+    const saveAllAiSettingsBtn = document.getElementById('saveAllAiSettingsBtn');
+    const aiSettingsSavedMsg = document.getElementById('aiSettingsSavedMsg');
+
+    // Toggle API Key visibility
+    if (toggleApiKeyVisibilityBtn && deepseekApiKeyInput) {
+        toggleApiKeyVisibilityBtn.addEventListener('click', () => {
+            if (deepseekApiKeyInput.type === 'password') {
+                deepseekApiKeyInput.type = 'text';
+                toggleApiKeyVisibilityBtn.textContent = '🔒';
+            } else {
+                deepseekApiKeyInput.type = 'password';
+                toggleApiKeyVisibilityBtn.textContent = '👁️';
+            }
+        });
+    }
+
+    // Auto-save prompt on input/change so user changes are never lost
+    if (deepseekSystemPrompt) {
+        let saveTimeout = null;
+        deepseekSystemPrompt.addEventListener('input', () => {
+            clearTimeout(saveTimeout);
+            saveTimeout = setTimeout(() => {
+                const val = (deepseekSystemPrompt.value || '').trim() || DEFAULT_PROMPT;
+                chrome.storage.local.set({ deepseekPrompt: val });
+            }, 500);
+        });
+        deepseekSystemPrompt.addEventListener('blur', () => {
+            clearTimeout(saveTimeout);
+            const val = (deepseekSystemPrompt.value || '').trim() || DEFAULT_PROMPT;
+            chrome.storage.local.set({ deepseekPrompt: val });
+        });
+    }
+
+    // Insert prompt chips into textarea
+    promptChips.forEach(chip => {
+        chip.addEventListener('click', () => {
+            const tag = chip.getAttribute('data-chip');
+            if (!tag || !deepseekSystemPrompt) return;
+            const start = deepseekSystemPrompt.selectionStart;
+            const end = deepseekSystemPrompt.selectionEnd;
+            const text = deepseekSystemPrompt.value;
+            deepseekSystemPrompt.value = text.substring(0, start) + tag + text.substring(end);
+            deepseekSystemPrompt.focus();
+            deepseekSystemPrompt.setSelectionRange(start + tag.length, start + tag.length);
+            chrome.storage.local.set({ deepseekPrompt: deepseekSystemPrompt.value });
+        });
+    });
+
+    // Reset prompt button
+    if (resetPromptBtn) {
+        resetPromptBtn.addEventListener('click', () => {
+            if (confirm('Сбросить главный системный промпт на стандартный?')) {
+                deepseekSystemPrompt.value = DEFAULT_PROMPT;
+            }
+        });
+    }
+
+    // Save & Verify Key button
+    if (saveDeepSeekKeyBtn) {
+        saveDeepSeekKeyBtn.addEventListener('click', () => {
+            const key = (deepseekApiKeyInput.value || '').trim();
+            if (!key) {
+                showKeyStatus('Укажите API-ключ перед проверкой', 'error');
+                return;
+            }
+
+            saveDeepSeekKeyBtn.disabled = true;
+            saveDeepSeekKeyBtn.textContent = 'Проверка...';
+            showKeyStatus('Связываемся с DeepSeek API...', 'info');
+
+            chrome.runtime.sendMessage({ action: 'deepseek_check_balance', apiKey: key }, (res) => {
+                saveDeepSeekKeyBtn.disabled = false;
+                saveDeepSeekKeyBtn.textContent = 'Проверить';
+
+                if (res && res.success) {
+                    chrome.storage.local.set({ deepseekApiKey: key }, () => {
+                        showKeyStatus('Ключ валиден и сохранен!', 'success');
+                        renderBalanceInfo(res.balanceInfo);
+                        setBadgeStatus(true);
+                    });
+                } else {
+                    const err = res?.error || 'Не удалось проверить ключ';
+                    showKeyStatus(`Ошибка: ${err}`, 'error');
+                    setBadgeStatus(false, 'Ошибка ключа');
+                }
+            });
+        });
+    }
+
+    // Refresh balance button
+    if (refreshBalanceBtn) {
+        refreshBalanceBtn.addEventListener('click', () => {
+            refreshBalanceBtn.disabled = true;
+            refreshBalanceBtn.textContent = 'Загрузка...';
+
+            chrome.runtime.sendMessage({ action: 'deepseek_check_balance' }, (res) => {
+                refreshBalanceBtn.disabled = false;
+                refreshBalanceBtn.textContent = '🔄 Обновить';
+
+                if (res && res.success) {
+                    renderBalanceInfo(res.balanceInfo);
+                    setBadgeStatus(true);
+                } else {
+                    const err = res?.error || 'Ошибка обновления баланса';
+                    deepseekBalanceSub.textContent = err;
+                    setBadgeStatus(false, 'Ошибка');
+                }
+            });
+        });
+    }
+
+    // Reset stats button
+    if (resetStatsBtn) {
+        resetStatsBtn.addEventListener('click', () => {
+            if (confirm('Сбросить статистику использованных токенов и расходов?')) {
+                chrome.runtime.sendMessage({ action: 'deepseek_reset_stats' }, (res) => {
+                    if (res && res.success) {
+                        renderStats(res.stats);
+                    }
+                });
+            }
+        });
+    }
+
+    // Save all settings button
+    if (saveAllAiSettingsBtn) {
+        saveAllAiSettingsBtn.addEventListener('click', () => {
+            const key = (deepseekApiKeyInput.value || '').trim();
+            const prompt = (deepseekSystemPrompt.value || '').trim() || DEFAULT_PROMPT;
+            const model = deepseekModelSelect.value || 'deepseek-chat';
+            const autoSend = deepseekAutoSendCheck.checked;
+            const delay = parseInt(deepseekDelayInput.value, 10) || 3;
+
+            chrome.storage.local.set({
+                deepseekApiKey: key,
+                deepseekPrompt: prompt,
+                deepseekModel: model,
+                deepseekAutoSend: autoSend,
+                deepseekDelay: delay
+            }, () => {
+                aiSettingsSavedMsg.textContent = '✓ Настройки успешно сохранены!';
+                aiSettingsSavedMsg.className = 'status-success';
+                setTimeout(() => {
+                    aiSettingsSavedMsg.className = 'status-hidden';
+                }, 2500);
+
+                if (key) {
+                    chrome.runtime.sendMessage({ action: 'deepseek_check_balance', apiKey: key }, (res) => {
+                        if (res && res.success) {
+                            renderBalanceInfo(res.balanceInfo);
+                            setBadgeStatus(true);
+                        } else {
+                            setBadgeStatus(false, 'Ошибка ключа');
+                        }
+                    });
+                } else {
+                    setBadgeStatus(false, 'Не настроен');
+                }
+            });
+        });
+    }
+
+    function showKeyStatus(text, type) {
+        if (!deepseekKeyStatusMsg) return;
+        deepseekKeyStatusMsg.textContent = text;
+        if (type === 'success') {
+            deepseekKeyStatusMsg.style.color = '#16a34a';
+        } else if (type === 'error') {
+            deepseekKeyStatusMsg.style.color = '#dc2626';
+        } else {
+            deepseekKeyStatusMsg.style.color = '#005bff';
+        }
+    }
+
+    function setBadgeStatus(isActive, customLabel) {
+        if (!deepseekStatusBadge) return;
+        if (isActive) {
+            deepseekStatusBadge.textContent = 'Активен';
+            deepseekStatusBadge.className = 'ai-badge active';
+        } else {
+            deepseekStatusBadge.textContent = customLabel || 'Не подключен';
+            deepseekStatusBadge.className = 'ai-badge error';
+        }
+    }
+
+    function renderBalanceInfo(data) {
+        if (!data || !data.balance_infos || !data.balance_infos[0]) {
+            if (deepseekBalanceValue) deepseekBalanceValue.textContent = '—';
+            if (deepseekBalanceRub) deepseekBalanceRub.textContent = 'Баланс недоступен';
+            return;
+        }
+
+        const info = data.balance_infos[0];
+        const currency = info.currency || 'CNY';
+        const total = parseFloat(info.total_balance || '0');
+        const symbol = currency === 'CNY' ? '¥' : '$';
+
+        if (deepseekBalanceValue) {
+            deepseekBalanceValue.textContent = `${symbol} ${total.toFixed(2)} ${currency}`;
+        }
+
+        if (deepseekBalanceRub) {
+            if (currency === 'CNY') {
+                const approxRub = (total * 13.5).toFixed(0);
+                deepseekBalanceRub.textContent = `≈ ${approxRub} ₽ (курс 1 CNY ≈ 13.5 ₽)`;
+            } else if (currency === 'USD') {
+                const approxRub = (total * 95).toFixed(0);
+                deepseekBalanceRub.textContent = `≈ ${approxRub} ₽`;
+            } else {
+                deepseekBalanceRub.textContent = `Доступно: ${total.toFixed(2)}`;
+            }
+        }
+    }
+
+    function renderStats(stats) {
+        const s = stats || {};
+        if (deepseekStatRequests) deepseekStatRequests.textContent = s.totalRequests || 0;
+        if (deepseekStatTokens) {
+            const tok = s.totalTokens || 0;
+            deepseekStatTokens.textContent = tok > 1000000 ? (tok / 1000000).toFixed(1) + 'M' : (tok > 1000 ? (tok / 1000).toFixed(1) + 'k' : tok);
+        }
+        if (deepseekStatCost) {
+            const cost = s.estimatedCostCNY || 0;
+            deepseekStatCost.textContent = `¥${cost.toFixed(3)}`;
+        }
+    }
+
+    function loadAiSettings() {
+        chrome.storage.local.get({
+            deepseekApiKey: '',
+            deepseekPrompt: DEFAULT_PROMPT,
+            deepseekModel: 'deepseek-chat',
+            deepseekAutoSend: false,
+            deepseekDelay: 3,
+            deepseekStats: {
+                totalRequests: 0,
+                totalPromptTokens: 0,
+                totalCompletionTokens: 0,
+                totalTokens: 0,
+                estimatedCostCNY: 0
+            },
+            deepseekLastBalance: null
+        }, (res) => {
+            if (deepseekApiKeyInput) deepseekApiKeyInput.value = res.deepseekApiKey || '';
+            if (deepseekSystemPrompt) deepseekSystemPrompt.value = res.deepseekPrompt || DEFAULT_PROMPT;
+            if (deepseekModelSelect) deepseekModelSelect.value = res.deepseekModel || 'deepseek-chat';
+            if (deepseekAutoSendCheck) deepseekAutoSendCheck.checked = !!res.deepseekAutoSend;
+            if (deepseekDelayInput) deepseekDelayInput.value = res.deepseekDelay || 3;
+
+            renderStats(res.deepseekStats);
+
+            if (res.deepseekLastBalance) {
+                renderBalanceInfo(res.deepseekLastBalance);
+            }
+
+            if (res.deepseekApiKey) {
+                setBadgeStatus(true);
+                // Background update balance
+                chrome.runtime.sendMessage({ action: 'deepseek_check_balance' }, (balRes) => {
+                    if (balRes && balRes.success) {
+                        renderBalanceInfo(balRes.balanceInfo);
+                        setBadgeStatus(true);
+                    }
+                });
+            } else {
+                setBadgeStatus(false, 'Не подключен');
+            }
+        });
+    }
+
+    // Call loadAiSettings once on initialization
+    loadAiSettings();
 });

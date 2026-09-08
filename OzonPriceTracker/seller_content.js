@@ -38,9 +38,12 @@
 
     function setNativeValue(element, value) {
         const proto = Object.getPrototypeOf(element);
-        const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+        const setter = Object.getOwnPropertyDescriptor(element, 'value')?.set ||
+                       Object.getOwnPropertyDescriptor(proto, 'value')?.set ||
+                       Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
         setter?.call(element, value);
         element.dispatchEvent(new Event('input', { bubbles: true }));
+        element.dispatchEvent(new Event('change', { bubbles: true }));
     }
 
     async function realDblClick(el) {
@@ -116,6 +119,9 @@
         chrome.storage.local.get(['ozonReplyTemplates'], (result) => {
             savedTemplates = normalizeReplyTemplates(result.ozonReplyTemplates);
             updateAllDropdowns();
+            if (typeof updateQuestionsSelectDropdowns === 'function') {
+                updateQuestionsSelectDropdowns();
+            }
             requestReposition();
         });
     }
@@ -1903,6 +1909,777 @@
     }
 
     // =========================================================================
+    // MODULE 3: Questions Assistant (DeepSeek)
+    // =========================================================================
+
+    let questionsObserver = null;
+    let isQuestionsBulkRunning = false;
+    let selectedQuestionRows = new Set();
+    let questionsFloatContainer = null;
+    let questionsSelectionSummary = null;
+    let questionsBulkBtn = null;
+    let lastClickedQuestionData = null;
+
+    function initQuestionsAssistant() {
+        // Toggle panel visibilities for SPA
+        const reviewsFloat = document.getElementById('opt-ext-float-container');
+        if (reviewsFloat) reviewsFloat.style.display = 'none';
+
+        const questionsFloat = document.getElementById('opt-ext-questions-float-container');
+        if (questionsFloat) questionsFloat.style.display = 'flex';
+
+        injectSellerStyles();
+
+        // Ensure reply templates are loaded for questions dropdowns
+        chrome.storage.local.get(['ozonReplyTemplates'], (result) => {
+            if (result.ozonReplyTemplates) {
+                savedTemplates = normalizeReplyTemplates(result.ozonReplyTemplates);
+                updateQuestionsSelectDropdowns();
+            }
+        });
+
+        setupQuestionsObserver();
+        initQuestionsFloatingPanel();
+    }
+
+    function setupQuestionsObserver() {
+        if (questionsObserver) return;
+
+        questionsObserver = new MutationObserver(() => {
+            // 1. Check for open drawer
+            enhanceVisibleQuestionsDrawer();
+
+            // 2. Check for table rows update
+            enhanceQuestionsTableRows();
+        });
+
+        questionsObserver.observe(document.body, {
+            childList: true,
+            subtree: true
+        });
+
+        // Run immediate check
+        enhanceVisibleQuestionsDrawer();
+        enhanceQuestionsTableRows();
+    }
+
+    function findQuestionsDrawer() {
+        // Direct modal/drawer container search on Ozon Seller
+        const paranja = document.querySelector('div[aria-label="Паранжа"], .ct3134-a, .ct3134-a0');
+        if (paranja && paranja.querySelector('textarea')) {
+            return paranja;
+        }
+
+        // Look for drawer/modal container with "Вопрос о товаре" or "Ответ на вопрос"
+        const headings = Array.from(document.querySelectorAll('h1, h2, h3, h4, div, span'));
+        const drawerTitle = headings.find(el => {
+            const txt = el.textContent?.trim();
+            return txt === 'Вопрос о товаре' || (txt && txt.includes('Вопрос о товаре'));
+        });
+
+        if (drawerTitle) {
+            let curr = drawerTitle.parentElement;
+            while (curr && curr !== document.body) {
+                if (curr.querySelector('textarea')) {
+                    return curr;
+                }
+                curr = curr.parentElement;
+            }
+        }
+
+        // Fallback: look for container holding textarea with placeholder "Ваш ответ" or "Ответ на вопрос"
+        const textarea = document.querySelector('textarea[placeholder*="ответ" i], textarea[id*="baseInput"]');
+        if (textarea) {
+            const modal = textarea.closest('div[aria-label="Паранжа"], .ct3134-a, .ct3134-a0, div[role="dialog"], aside');
+            if (modal) return modal;
+            let curr = textarea.parentElement;
+            while (curr && curr !== document.body) {
+                if (curr.textContent.includes('Вопрос о товаре') || curr.textContent.includes('Общая информация')) {
+                    return curr;
+                }
+                curr = curr.parentElement;
+            }
+            return textarea.parentElement;
+        }
+
+        return null;
+    }
+
+    function extractDrawerContext(drawer) {
+        let product = '';
+        let brand = '';
+        let sku = '';
+        let buyer = '';
+        let question = '';
+        let article = '';
+
+        // 1. Direct row parsing by .n1d-ga8 / field label
+        const rows = Array.from(drawer.querySelectorAll('.n1d-ga8, [class*="n1d-ga8"]'));
+        rows.forEach(r => {
+            const labelEl = r.firstElementChild;
+            const labelText = labelEl?.textContent?.trim() || '';
+
+            if (/^Бренд$/i.test(labelText)) {
+                brand = labelEl.nextElementSibling?.textContent?.trim() || brand;
+            } else if (/^Артикул$/i.test(labelText)) {
+                article = labelEl.nextElementSibling?.textContent?.trim() || article;
+            } else if (/^Покупатель$/i.test(labelText)) {
+                buyer = labelEl.nextElementSibling?.textContent?.trim() || buyer;
+            } else if (/^Вопрос$/i.test(labelText)) {
+                const qContent = r.querySelector('.n1d-ha, [class*="n1d-ha"]') || labelEl.nextElementSibling;
+                if (qContent) {
+                    question = qContent.textContent?.trim() || question;
+                }
+            } else if (/^Товар$/i.test(labelText)) {
+                const prodLink = r.querySelector('a[href*="/product/"]');
+                if (prodLink) {
+                    const mbTitle = prodLink.querySelector('.mb1, [class*="mb1"]');
+                    product = mbTitle?.textContent?.trim() || prodLink.textContent?.trim() || product;
+                    const skuMatch = prodLink.href.match(/product\/.*?-(\d+)\/?/) || prodLink.href.match(/(\d{8,12})/);
+                    if (skuMatch) sku = skuMatch[1];
+                }
+            }
+        });
+
+        // 2. Fallback search across all drawer elements
+        if (!question || !product || !brand || !article || !buyer) {
+            const allElements = Array.from(drawer.querySelectorAll('*'));
+
+            function getValueAfterLabel(labelRegex) {
+                for (let i = 0; i < allElements.length; i++) {
+                    const el = allElements[i];
+                    if (el.children.length === 0 && labelRegex.test(el.textContent?.trim() || '')) {
+                        let next = el.nextElementSibling;
+                        if (next && next.textContent.trim()) return next.textContent.trim();
+                        let pNext = el.parentElement?.nextElementSibling;
+                        if (pNext && pNext.textContent.trim()) return pNext.textContent.trim();
+                        if (el.parentElement && el.parentElement.children.length >= 2) {
+                            return el.parentElement.children[1].textContent.trim();
+                        }
+                    }
+                }
+                return '';
+            }
+
+            if (!brand) brand = getValueAfterLabel(/^Бренд$/i);
+            if (!article) article = getValueAfterLabel(/^Артикул$/i);
+            if (!buyer) buyer = getValueAfterLabel(/^Покупатель$/i);
+            if (!question) {
+                const qBlock = drawer.querySelector('.n1d-ha, [class*="n1d-ha"]');
+                question = qBlock?.textContent?.trim() || getValueAfterLabel(/^Вопрос$/i);
+            }
+            if (!product) {
+                const productLink = drawer.querySelector('a[href*="/product/"]');
+                if (productLink) {
+                    const mbTitle = productLink.querySelector('.mb1, [class*="mb1"]');
+                    product = mbTitle?.textContent?.trim() || productLink.textContent?.trim() || '';
+                    const skuMatch = productLink.href.match(/product\/.*?-(\d+)\/?/) || productLink.href.match(/(\d{8,12})/);
+                    if (skuMatch) sku = skuMatch[1];
+                }
+            }
+        }
+
+        // Clean product title if SKU was attached at the end
+        if (product && sku && product.endsWith(sku)) {
+            product = product.slice(0, -sku.length).trim();
+        }
+
+        // Check for SKU in number element if still not found
+        if (!sku) {
+            const numEl = Array.from(drawer.querySelectorAll('div, span')).find(d => /^\d{8,12}$/.test(d.textContent?.trim()));
+            if (numEl) sku = numEl.textContent.trim();
+        }
+
+        // Fallback to last clicked row data if some fields are missing
+        if (lastClickedQuestionData) {
+            if (!product && lastClickedQuestionData.product) product = lastClickedQuestionData.product;
+            if (!sku && lastClickedQuestionData.sku) sku = lastClickedQuestionData.sku;
+            if (!question && lastClickedQuestionData.question) question = lastClickedQuestionData.question;
+            if (!brand && lastClickedQuestionData.seller) brand = lastClickedQuestionData.seller;
+        }
+
+        return { product, brand, sku, buyer, question, article };
+    }
+
+    function enhanceVisibleQuestionsDrawer() {
+        const drawer = findQuestionsDrawer();
+        if (!drawer) return;
+
+        if (drawer.querySelector('.opt-ext-ai-drawer-card')) return;
+
+        const textarea = drawer.querySelector('textarea');
+        if (!textarea) return;
+
+        // Build AI Assistant Drawer Card
+        const card = document.createElement('div');
+        card.className = 'opt-ext-ai-drawer-card';
+
+        // Header
+        const header = document.createElement('div');
+        header.className = 'opt-ext-ai-header';
+
+        const titleWrap = document.createElement('div');
+        titleWrap.className = 'opt-ext-ai-title-wrap';
+
+        const title = document.createElement('span');
+        title.className = 'opt-ext-ai-title';
+        title.textContent = '✨ DeepSeek AI';
+
+        const badge = document.createElement('span');
+        badge.className = 'opt-ext-ai-badge';
+        badge.textContent = 'V3';
+
+        titleWrap.append(title, badge);
+
+        const balanceChip = document.createElement('span');
+        balanceChip.className = 'opt-ext-ai-balance-chip';
+        balanceChip.textContent = 'Баланс...';
+
+        // Read cached balance
+        chrome.storage.local.get(['deepseekLastBalance'], (res) => {
+            if (res.deepseekLastBalance?.balance_infos?.[0]) {
+                const info = res.deepseekLastBalance.balance_infos[0];
+                const symbol = info.currency === 'CNY' ? '¥' : '$';
+                const bal = parseFloat(info.total_balance || '0').toFixed(2);
+                balanceChip.textContent = `${symbol} ${bal}`;
+            } else {
+                balanceChip.textContent = 'AI готов';
+            }
+        });
+
+        header.append(titleWrap, balanceChip);
+
+        // Buttons row
+        const btnRow = document.createElement('div');
+        btnRow.className = 'opt-ext-ai-btn-row';
+
+        const genBtn = document.createElement('button');
+        genBtn.type = 'button';
+        genBtn.className = 'opt-ext-ai-btn opt-ext-ai-gen-btn';
+        genBtn.innerHTML = '✨ Сгенерировать ответ';
+
+        const genSendBtn = document.createElement('button');
+        genSendBtn.type = 'button';
+        genSendBtn.className = 'opt-ext-ai-btn opt-ext-ai-gensend-btn';
+        genSendBtn.innerHTML = '🚀 Сгенерировать и отправить';
+
+        btnRow.append(genBtn, genSendBtn);
+
+        // Status bar
+        const statusEl = document.createElement('div');
+        statusEl.className = 'opt-ext-ai-status';
+        statusEl.textContent = 'Нажмите кнопку для генерации ответа';
+
+        card.append(header, btnRow, statusEl);
+
+        // Action handler for AI generation
+        async function runAiGeneration(autoSendAfter) {
+            const context = extractDrawerContext(drawer);
+
+            if (!context.question) {
+                statusEl.className = 'opt-ext-ai-status error';
+                statusEl.textContent = '⚠️ Не удалось найти текст вопроса в окне';
+                return;
+            }
+
+            genBtn.disabled = true;
+            genSendBtn.disabled = true;
+            statusEl.className = 'opt-ext-ai-status';
+            statusEl.innerHTML = '<span class="opt-ext-ai-spinner"></span> Анализирую товар и формулирую ответ...';
+
+            chrome.runtime.sendMessage({
+                action: 'deepseek_generate_answer',
+                data: context
+            }, async (response) => {
+                genBtn.disabled = false;
+                genSendBtn.disabled = false;
+
+                if (!response || !response.success) {
+                    const errMsg = response?.error || 'Неизвестная ошибка генерации';
+                    statusEl.className = 'opt-ext-ai-status error';
+                    statusEl.textContent = `⚠️ ${errMsg}`;
+                    return;
+                }
+
+                // Insert into textarea
+                setNativeValue(textarea, response.answer);
+                textarea.dispatchEvent(new Event('input', { bubbles: true }));
+                textarea.dispatchEvent(new Event('change', { bubbles: true }));
+                textarea.dispatchEvent(new Event('blur', { bubbles: true }));
+
+                const tokens = response.usage?.total_tokens || '—';
+                statusEl.className = 'opt-ext-ai-status success';
+                statusEl.textContent = `✓ Ответ готов (${tokens} токенов)`;
+
+                // Update balance chip if stats returned
+                if (response.stats) {
+                    chrome.storage.local.get(['deepseekLastBalance'], (bRes) => {
+                        if (bRes.deepseekLastBalance?.balance_infos?.[0]) {
+                            const info = bRes.deepseekLastBalance.balance_infos[0];
+                            const symbol = info.currency === 'CNY' ? '¥' : '$';
+                            const bal = parseFloat(info.total_balance || '0').toFixed(2);
+                            balanceChip.textContent = `${symbol} ${bal}`;
+                        }
+                    });
+                }
+
+                // Auto-send ONLY if explicitly requested by clicking "Сгенерировать и отправить"
+                if (autoSendAfter === true) {
+                    statusEl.textContent = '✓ Ответ вставлен, отправляю...';
+                    await sleep(400);
+
+                    const submitBtn = findDrawerSubmitButton(drawer);
+                    if (submitBtn) {
+                        submitBtn.click();
+                        statusEl.textContent = '✓ Ответ отправлен покупателю!';
+                    } else {
+                        statusEl.textContent = '✓ Ответ вставлен (нажмите «Отправить ответ»)';
+                    }
+                } else {
+                    statusEl.textContent = '✓ Ответ вставлен в поле ввода. Проверьте и отправьте.';
+                }
+            });
+        }
+
+        genBtn.addEventListener('click', () => runAiGeneration(false));
+        genSendBtn.addEventListener('click', () => runAiGeneration(true));
+
+        // Insert card directly above textarea wrapper (.ct6135-a0 / .mb4) inside .mt7
+        const inputWrapper = textarea.closest('.ct6135-a0, .mb4') || textarea.closest('.ct6135-a1') || textarea.parentElement;
+        if (inputWrapper && inputWrapper.parentElement) {
+            inputWrapper.parentElement.insertBefore(card, inputWrapper);
+        } else {
+            textarea.parentElement.insertBefore(card, textarea);
+        }
+    }
+
+    function findDrawerSubmitButton(drawer) {
+        const submitBtn = drawer.querySelector('button[type="submit"], button.c9r134-a');
+        if (submitBtn && submitBtn.textContent.toLowerCase().includes('отправить')) {
+            return submitBtn;
+        }
+        const buttons = Array.from(drawer.querySelectorAll('button'));
+        return buttons.find(b => {
+            const txt = b.textContent?.trim().toLowerCase();
+            return txt.includes('отправить') || b.type === 'submit';
+        });
+    }
+
+    function findDrawerCloseButton(drawer) {
+        const directClose = drawer.querySelector('button[aria-label*="закрыт" i], button[aria-label*="Крестик" i], .ct3134-a1, button[class*="ct3134-a1"]');
+        if (directClose) return directClose;
+        const closeIcon = drawer.querySelector('svg[data-testid="InformerCloseIcon"], svg[class*="close"]');
+        if (closeIcon) return closeIcon.closest('button') || closeIcon;
+        const allBtns = Array.from(drawer.querySelectorAll('button'));
+        return allBtns.find(b => b.querySelector('svg') && !b.textContent.trim());
+    }
+
+    // =========================================================================
+    // Table Rows Enhancement & Batch Answering
+    // =========================================================================
+
+    function isQuestionRowAnswered(tr) {
+        const cells = Array.from(tr.querySelectorAll('td'));
+        // If our checkbox td is already inserted, answers count is at index 5.
+        // If not yet inserted, answers count is at index 4.
+        const targetIndex = tr.querySelector('.opt-ext-question-td') ? 5 : 4;
+        if (cells.length > targetIndex) {
+            const num = parseInt(cells[targetIndex].textContent?.trim(), 10);
+            return !isNaN(num) && num > 0;
+        }
+        return false;
+    }
+
+    function populateQuestionsBulkSelect(select) {
+        if (!select) return;
+        const currentVal = select.value;
+        select.innerHTML = '';
+
+        const defaultOpt = document.createElement('option');
+        defaultOpt.value = '';
+        defaultOpt.textContent = 'Применить...';
+        select.appendChild(defaultOpt);
+
+        const aiOpt = document.createElement('option');
+        aiOpt.value = 'deepseek_ai';
+        aiOpt.textContent = '✨ DeepSeek AI';
+        select.appendChild(aiOpt);
+
+        const templates = savedTemplates.filter(t => t.id !== '__default_all_selected_reviews__');
+        if (templates.length > 0) {
+            const grp = document.createElement('optgroup');
+            grp.label = 'Шаблоны ответов';
+            templates.forEach(tpl => {
+                const opt = document.createElement('option');
+                opt.value = tpl.id;
+                opt.textContent = tpl.title;
+                grp.appendChild(opt);
+            });
+            select.appendChild(grp);
+        }
+
+        select.value = currentVal || '';
+    }
+
+    function populateQuestionsRowSelect(select) {
+        if (!select) return;
+        const currentVal = select.value;
+        select.innerHTML = '';
+
+        const aiOpt = document.createElement('option');
+        aiOpt.value = 'deepseek_ai';
+        aiOpt.textContent = '✨ DeepSeek AI';
+        select.appendChild(aiOpt);
+
+        const templates = savedTemplates.filter(t => t.id !== '__default_all_selected_reviews__');
+        if (templates.length > 0) {
+            const grp = document.createElement('optgroup');
+            grp.label = 'Шаблоны ответов';
+            templates.forEach(tpl => {
+                const opt = document.createElement('option');
+                opt.value = tpl.id;
+                opt.textContent = tpl.title;
+                grp.appendChild(opt);
+            });
+            select.appendChild(grp);
+        }
+
+        if (currentVal && Array.from(select.options).some(o => o.value === currentVal)) {
+            select.value = currentVal;
+        } else {
+            select.value = 'deepseek_ai';
+        }
+    }
+
+    function updateQuestionsSelectDropdowns() {
+        const bulkSelect = document.querySelector('.opt-ext-question-bulk-select');
+        if (bulkSelect) populateQuestionsBulkSelect(bulkSelect);
+
+        const rowSelects = document.querySelectorAll('.opt-ext-question-row-select');
+        rowSelects.forEach(sel => populateQuestionsRowSelect(sel));
+    }
+
+    function enhanceQuestionsTableRows() {
+        const table = document.querySelector('table.ct5140-a, table');
+        if (!table) return;
+
+        // Enhance header if not yet enhanced (or upgrade if missing bulk select)
+        const theadRow = table.querySelector('thead tr');
+        if (theadRow) {
+            let th = theadRow.querySelector('.opt-ext-question-th');
+            if (th && !th.querySelector('.opt-ext-question-bulk-select')) {
+                th.remove();
+                th = null;
+            }
+
+            if (!th) {
+                th = document.createElement('th');
+                th.className = 'opt-ext-question-th';
+
+                const thInner = document.createElement('div');
+                thInner.className = 'opt-ext-question-th-inner';
+
+                const checkAllCb = document.createElement('input');
+                checkAllCb.type = 'checkbox';
+                checkAllCb.className = 'opt-ext-question-cb';
+                checkAllCb.title = 'Выбрать все неотвеченные вопросы на странице';
+                checkAllCb.addEventListener('change', (e) => {
+                    const checked = e.target.checked;
+                    const rowCbs = table.querySelectorAll('tbody .opt-ext-question-cb:not(:disabled)');
+                    selectedQuestionRows.clear();
+                    rowCbs.forEach(cb => {
+                        cb.checked = checked;
+                        const tr = cb.closest('tr');
+                        if (checked && tr) selectedQuestionRows.add(tr);
+                    });
+                    updateQuestionsSelectionSummary();
+                });
+
+                const bulkSelect = document.createElement('select');
+                bulkSelect.className = 'opt-ext-question-select opt-ext-question-bulk-select';
+                bulkSelect.title = 'Массово выбрать действие для всех отмеченных вопросов';
+                populateQuestionsBulkSelect(bulkSelect);
+
+                bulkSelect.addEventListener('change', (e) => {
+                    const val = e.target.value;
+                    if (!val) return;
+                    const checkedRows = Array.from(selectedQuestionRows);
+                    if (checkedRows.length === 0) {
+                        alert('Сначала отметьте вопросы чекбоксом');
+                        e.target.value = '';
+                        return;
+                    }
+                    checkedRows.forEach(tr => {
+                        const rowSel = tr.querySelector('.opt-ext-question-row-select');
+                        if (rowSel) {
+                            rowSel.value = val;
+                        }
+                    });
+                    e.target.value = '';
+                });
+
+                thInner.append(checkAllCb, bulkSelect);
+                th.appendChild(thInner);
+                theadRow.insertBefore(th, theadRow.firstChild);
+            }
+        }
+
+        // Enhance body rows
+        const rows = Array.from(table.querySelectorAll('tbody tr'));
+        rows.forEach(tr => {
+            let td = tr.querySelector('.opt-ext-question-td');
+            if (td && !td.querySelector('.opt-ext-question-row-select') && !td.querySelector('.opt-ext-replied-span')) {
+                td.remove();
+                td = null;
+            }
+
+            if (!td) {
+                td = document.createElement('td');
+                td.className = 'opt-ext-question-td';
+
+                const tdInner = document.createElement('div');
+                tdInner.className = 'opt-ext-question-td-inner';
+
+                const cb = document.createElement('input');
+                cb.type = 'checkbox';
+                cb.className = 'opt-ext-question-cb';
+
+                const alreadyAnswered = isQuestionRowAnswered(tr);
+                if (alreadyAnswered) {
+                    cb.disabled = true;
+                    cb.title = 'На этот вопрос уже дан ответ';
+                    cb.style.opacity = '0.35';
+                    cb.style.cursor = 'not-allowed';
+
+                    const repliedSpan = document.createElement('span');
+                    repliedSpan.className = 'opt-ext-replied-span';
+                    repliedSpan.textContent = 'Уже отвечено';
+                    repliedSpan.style.cssText = 'color: #94a3b8; font-size: 11px; font-style: italic; white-space: nowrap;';
+
+                    tdInner.append(cb, repliedSpan);
+                } else {
+                    const rowSelect = document.createElement('select');
+                    rowSelect.className = 'opt-ext-question-select opt-ext-question-row-select';
+                    rowSelect.title = 'Способ ответа (DeepSeek AI или готовый шаблон)';
+                    populateQuestionsRowSelect(rowSelect);
+
+                    cb.addEventListener('change', () => {
+                        if (cb.checked) {
+                            selectedQuestionRows.add(tr);
+                        } else {
+                            selectedQuestionRows.delete(tr);
+                        }
+                        updateQuestionsSelectionSummary();
+                    });
+
+                    tdInner.append(cb, rowSelect);
+                }
+
+                td.appendChild(tdInner);
+                tr.insertBefore(td, tr.firstChild);
+            }
+
+            // Track question click from row
+            const questionBtn = tr.querySelector('button');
+            if (questionBtn && !questionBtn.__optExtClickBound) {
+                questionBtn.__optExtClickBound = true;
+                questionBtn.addEventListener('click', () => {
+                    // Cache row details
+                    const productLink = tr.querySelector('a[href*="/product/"]');
+                    const skuEl = tr.querySelector('div[class*="c7r134"]');
+                    lastClickedQuestionData = {
+                        product: productLink?.textContent?.trim() || '',
+                        sku: skuEl?.textContent?.trim() || '',
+                        question: questionBtn.textContent?.trim() || '',
+                        seller: tr.querySelectorAll('td')[2]?.textContent?.trim() || ''
+                    };
+                });
+            }
+        });
+    }
+
+    function initQuestionsFloatingPanel() {
+        if (document.getElementById('opt-ext-questions-float-container')) return;
+
+        questionsFloatContainer = document.createElement('div');
+        questionsFloatContainer.id = 'opt-ext-questions-float-container';
+
+        const header = document.createElement('div');
+        header.className = 'opt-ext-panel-header';
+
+        const title = document.createElement('div');
+        title.className = 'opt-ext-panel-title';
+        title.textContent = 'AI Ответы на вопросы';
+
+        const badge = document.createElement('span');
+        badge.className = 'opt-ext-panel-badge';
+        badge.textContent = 'DEEPSEEK';
+
+        header.append(title, badge);
+
+        questionsSelectionSummary = document.createElement('div');
+        questionsSelectionSummary.id = 'opt-ext-questions-summary';
+        questionsSelectionSummary.style.fontSize = '11px';
+        questionsSelectionSummary.style.color = '#64748b';
+        questionsSelectionSummary.textContent = 'Выбрано вопросов: 0';
+
+        questionsBulkBtn = document.createElement('button');
+        questionsBulkBtn.id = 'opt-ext-questions-submit-btn';
+        questionsBulkBtn.className = 'opt-ext-ai-btn opt-ext-ai-gen-btn';
+        questionsBulkBtn.style.width = '100%';
+        questionsBulkBtn.textContent = 'Ответить на выбранные (0)';
+        questionsBulkBtn.disabled = true;
+
+        questionsBulkBtn.addEventListener('click', startBatchQuestionsAnswering);
+
+        questionsFloatContainer.append(header, questionsSelectionSummary, questionsBulkBtn);
+        document.body.appendChild(questionsFloatContainer);
+    }
+
+    function updateQuestionsSelectionSummary() {
+        const count = selectedQuestionRows.size;
+        if (questionsSelectionSummary) {
+            questionsSelectionSummary.textContent = `Выбрано вопросов: ${count}`;
+        }
+        if (questionsBulkBtn) {
+            questionsBulkBtn.disabled = count === 0 || isQuestionsBulkRunning;
+            questionsBulkBtn.textContent = `Ответить на выбранные (${count})`;
+        }
+    }
+
+    async function startBatchQuestionsAnswering() {
+        if (isQuestionsBulkRunning || selectedQuestionRows.size === 0) return;
+
+        isQuestionsBulkRunning = true;
+        questionsBulkBtn.disabled = true;
+
+        const rowsArray = Array.from(selectedQuestionRows);
+        const total = rowsArray.length;
+        let processed = 0;
+        let successCount = 0;
+
+        const settings = await new Promise(res => chrome.storage.local.get({ deepseekDelay: 3 }, res));
+        const delayMs = (settings.deepseekDelay || 3) * 1000;
+
+        for (let i = 0; i < rowsArray.length; i++) {
+            const tr = rowsArray[i];
+            if (isQuestionRowAnswered(tr)) {
+                selectedQuestionRows.delete(tr);
+                continue;
+            }
+
+            processed++;
+            questionsSelectionSummary.textContent = `Обработка ${processed} из ${total}...`;
+
+            try {
+                // Find question button in row
+                const questionBtn = tr.querySelector('button');
+                if (!questionBtn) continue;
+
+                // Determine answer mode from row select
+                const rowSelect = tr.querySelector('.opt-ext-question-row-select');
+                const mode = rowSelect ? rowSelect.value : 'deepseek_ai';
+
+                // Cache row context
+                const productLink = tr.querySelector('a[href*="/product/"]');
+                const skuEl = tr.querySelector('div[class*="c7r134"]');
+                lastClickedQuestionData = {
+                    product: productLink?.textContent?.trim() || '',
+                    sku: skuEl?.textContent?.trim() || '',
+                    question: questionBtn.textContent?.trim() || '',
+                    seller: tr.querySelectorAll('td')[2]?.textContent?.trim() || ''
+                };
+
+                // 1. Open drawer
+                questionBtn.click();
+
+                // 2. Wait for drawer to appear
+                let drawer = null;
+                for (let attempt = 0; attempt < 20; attempt++) {
+                    await sleep(250);
+                    drawer = findQuestionsDrawer();
+                    if (drawer && drawer.querySelector('textarea')) break;
+                }
+
+                if (!drawer) continue;
+
+                const textarea = drawer.querySelector('textarea');
+                if (!textarea) continue;
+
+                let answerText = '';
+
+                if (mode === 'deepseek_ai') {
+                    // Extract context and generate with DeepSeek
+                    const context = extractDrawerContext(drawer);
+                    const res = await new Promise((resolve) => {
+                        chrome.runtime.sendMessage({
+                            action: 'deepseek_generate_answer',
+                            data: context
+                        }, resolve);
+                    });
+
+                    if (res && res.success && res.answer) {
+                        answerText = res.answer;
+                    } else {
+                        console.error('[opt-ext] Ошибка генерации DeepSeek:', res?.error);
+                    }
+                } else {
+                    // Template mode
+                    const tpl = savedTemplates.find(t => t.id === mode);
+                    if (tpl && tpl.text) {
+                        answerText = tpl.text;
+                    } else {
+                        console.error('[opt-ext] Шаблон не найден:', mode);
+                    }
+                }
+
+                if (answerText) {
+                    // 3. Fill textarea
+                    setNativeValue(textarea, answerText);
+                    textarea.dispatchEvent(new Event('input', { bubbles: true }));
+                    textarea.dispatchEvent(new Event('change', { bubbles: true }));
+                    textarea.dispatchEvent(new Event('blur', { bubbles: true }));
+
+                    await sleep(350);
+
+                    // 4. Submit answer
+                    const submitBtn = findDrawerSubmitButton(drawer);
+                    if (submitBtn) {
+                        submitBtn.click();
+                        successCount++;
+                    }
+
+                    await sleep(500);
+
+                    // 5. Close drawer
+                    const closeBtn = findDrawerCloseButton(drawer);
+                    if (closeBtn) closeBtn.click();
+
+                    // Uncheck row
+                    const cb = tr.querySelector('.opt-ext-question-cb');
+                    if (cb) cb.checked = false;
+                    selectedQuestionRows.delete(tr);
+                } else {
+                    // Close drawer if generation failed
+                    const closeBtn = findDrawerCloseButton(drawer);
+                    if (closeBtn) closeBtn.click();
+                }
+            } catch (err) {
+                console.error('[opt-ext] Ошибка обработки вопроса в строке:', err);
+            }
+
+            // Pause between questions
+            if (i < rowsArray.length - 1) {
+                await sleep(delayMs);
+            }
+        }
+
+        isQuestionsBulkRunning = false;
+        questionsSelectionSummary.textContent = `Готово! Успешно отправлено: ${successCount} из ${total}`;
+        updateQuestionsSelectionSummary();
+    }
+
+    // =========================================================================
     // Router & SPA URL Observer
     // =========================================================================
 
@@ -1910,6 +2687,8 @@
         const href = window.location.href;
         if (href.includes('/app/products/edit/') || href.includes('behavior=bulk_extended') || href.includes('/products/edit/')) {
             initRichContentBulkFiller();
+        } else if (href.includes('/app/reviews/questions') || href.includes('questions')) {
+            initQuestionsAssistant();
         } else if (href.includes('/app/reviews')) {
             initReviewsAutoReply();
         }

@@ -10,6 +10,7 @@
         <button class="tab-btn active" data-tab="tracking-tab">Ozon</button>
         <button class="tab-btn" data-tab="wb-tab">Wildberries</button>
         <button class="tab-btn" data-tab="reviews-tab">Ответы</button>
+        <button class="tab-btn" data-tab="ai-questions-tab">Вопросы AI</button>
         <button class="tab-btn" data-tab="history-tab">История</button>
     </div>
 
@@ -136,6 +137,107 @@
         <div id="templatesList" style="max-height: 200px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px;">
             <!-- Templates will be injected here -->
         </div>
+    </div>
+
+    <div class="container tab-content" id="ai-questions-tab">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+            <h2 style="margin: 0; font-size: 16px;">Вопросы (DeepSeek)</h2>
+            <span class="ai-badge" id="deepseekStatusBadge">Проверка...</span>
+        </div>
+
+        <!-- API Key Box -->
+        <div class="settings-box ai-card">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                <label style="font-size: 12px; font-weight: 700; color: #333;">DeepSeek API Ключ</label>
+                <a href="https://platform.deepseek.com/api_keys" target="_blank" style="color: #005bff; text-decoration: none; font-size: 11px; font-weight: 600;">Получить ключ ↗</a>
+            </div>
+            <div style="display: flex; gap: 6px;">
+                <div style="position: relative; flex: 1;">
+                    <input type="password" id="deepseekApiKey" placeholder="sk-..." style="width: 100%; box-sizing: border-box; padding: 7px 30px 7px 8px; font-family: monospace; font-size: 12px; border: 1px solid #ddd; border-radius: 6px;">
+                    <button type="button" id="toggleApiKeyVisibility" style="position: absolute; right: 4px; top: 50%; transform: translateY(-50%); background: none; border: none; padding: 4px; color: #777; cursor: pointer; font-size: 13px;">👁️</button>
+                </div>
+                <button id="saveDeepSeekKeyBtn" style="padding: 7px 12px; font-size: 12px; white-space: nowrap; border-radius: 6px;">Проверить</button>
+            </div>
+            <div id="deepseekKeyStatusMsg" style="font-size: 11px; margin-top: 5px; min-height: 15px;"></div>
+        </div>
+
+        <!-- Balance & Stats Dashboard -->
+        <div class="settings-box ai-card" id="deepseekDashboard">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                <span style="font-size: 12px; font-weight: 700; color: #222;">Дашборд баланса & расхода</span>
+                <button id="refreshBalanceBtn" title="Обновить баланс" style="background: #fff; border: 1px solid #cfe0ff; border-radius: 4px; padding: 3px 8px; font-size: 11px; color: #005bff; cursor: pointer; font-weight: 600;">🔄 Обновить</button>
+            </div>
+            <div class="ai-balance-widget">
+                <div class="ai-balance-main">
+                    <span class="ai-balance-label">Остаток на балансе:</span>
+                    <span class="ai-balance-value" id="deepseekBalanceValue">—</span>
+                </div>
+                <div class="ai-balance-sub" id="deepseekBalanceRub">Баланс еще не проверен</div>
+            </div>
+            <div class="ai-stats-grid">
+                <div class="ai-stat-box">
+                    <div class="ai-stat-num" id="deepseekStatRequests">0</div>
+                    <div class="ai-stat-label">Ответов</div>
+                </div>
+                <div class="ai-stat-box">
+                    <div class="ai-stat-num" id="deepseekStatTokens">0</div>
+                    <div class="ai-stat-label">Токенов</div>
+                </div>
+                <div class="ai-stat-box">
+                    <div class="ai-stat-num" id="deepseekStatCost">¥0.00</div>
+                    <div class="ai-stat-label">Расход</div>
+                </div>
+            </div>
+            <div style="display: flex; justify-content: flex-end; margin-top: 8px;">
+                <button id="resetStatsBtn" style="background: none; border: none; color: #888; font-size: 11px; cursor: pointer; text-decoration: underline; padding: 0;">Сбросить статистику</button>
+            </div>
+        </div>
+
+        <!-- Main System Prompt -->
+        <div class="settings-box ai-card">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                <label style="font-size: 12px; font-weight: 700; color: #222;">Главный системный промпт</label>
+                <button id="resetPromptBtn" style="background: none; border: none; color: #005bff; font-size: 11px; cursor: pointer; font-weight: 600; padding: 0;">Сброс</button>
+            </div>
+            <div style="font-size: 11px; color: #666; margin-bottom: 6px;">Определяет роль, поведение и правила формулировки ответов:</div>
+            <textarea id="deepseekSystemPrompt" rows="6" placeholder="Текст системного промпта..." style="width: 100%; box-sizing: border-box; font-size: 12px; line-height: 1.4; resize: vertical; border: 1px solid #ddd; border-radius: 6px; padding: 8px;"></textarea>
+            <div style="display: flex; gap: 4px; flex-wrap: wrap; margin-top: 6px; align-items: center;">
+                <span style="font-size: 10px; color: #888;">Вставить тег:</span>
+                <button type="button" class="prompt-chip" data-chip="{product}">{product}</button>
+                <button type="button" class="prompt-chip" data-chip="{brand}">{brand}</button>
+                <button type="button" class="prompt-chip" data-chip="{sku}">{sku}</button>
+                <button type="button" class="prompt-chip" data-chip="{question}">{question}</button>
+                <button type="button" class="prompt-chip" data-chip="{buyer}">{buyer}</button>
+            </div>
+        </div>
+
+        <!-- Assistant Options -->
+        <div class="settings-box ai-card">
+            <label style="font-size: 12px; font-weight: 700; color: #222; margin-bottom: 8px; display: block;">Параметры автоответов</label>
+            <div style="display: flex; flex-direction: column; gap: 8px;">
+                <label class="checkbox-container" style="font-size: 12px;">
+                    <input type="checkbox" id="deepseekAutoSend">
+                    Сразу нажимать «Отправить ответ»
+                </label>
+                <div style="display: flex; justify-content: space-between; align-items: center; font-size: 12px;">
+                    <span>Модель:</span>
+                    <select id="deepseekModelSelect" style="padding: 4px 8px; border-radius: 4px; border: 1px solid #ddd; font-size: 12px;">
+                        <option value="deepseek-chat" selected>deepseek-chat (быстрая V3)</option>
+                        <option value="deepseek-reasoner">deepseek-reasoner (мышление R1)</option>
+                    </select>
+                </div>
+                <div style="display: flex; justify-content: space-between; align-items: center; font-size: 12px;">
+                    <span>Задержка между вопросами:</span>
+                    <div style="display: flex; align-items: center; gap: 4px;">
+                        <input type="number" id="deepseekDelay" min="1" max="60" value="3" style="width: 50px; padding: 4px; border-radius: 4px; border: 1px solid #ddd; font-size: 12px; text-align: center;">
+                        <span style="color: #666;">сек</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <button id="saveAllAiSettingsBtn" style="padding: 10px; font-size: 13px; font-weight: 700; border-radius: 6px;">Сохранить настройки AI</button>
+        <div id="aiSettingsSavedMsg" class="status-hidden" style="text-align: center; font-size: 12px; font-weight: 600;"></div>
     </div>
 
     <div class="container tab-content" id="history-tab">

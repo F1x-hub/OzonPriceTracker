@@ -6,35 +6,21 @@
 
 ### [1.0.3]
 
-#### Features
-- Встроить шаблоны и чекбоксы ответов непосредственно в ячейки таблицы Seller Reviews.
-- Добавить заметную панель ассистента отзывов на странице Seller Reviews.
-- Оформить оверлейные чекбоксы и селекты в едином стиле расширения.
-- Добавлен изолированный виджет отслеживания цены на странице товара Ozon.
-- Связать виджет страницы товара с существующим хранилищем `trackedItems`.
-- Добавлен модуль автоответов на отзывы покупателей на платформе seller.ozon.ru.
-- Добавлен модуль массового заполнения Rich-контента из аннотации товаров в AG-Grid на странице массового редактирования Ozon Seller (`seller_content.js`).
-- Реализована плавающая кнопка и индикатор прогресса массовой обработки Rich-контента с привязкой к кнопке ассистента Ozon (`[data-onboarding-target="floating-ai-assistant-button"]`).
-- Реализована вкладка «Ответы» в popup окне расширения с CRUD-управлением шаблонами ответов.
-- Добавлена настройка случайной задержки между отправками в настройках ответов.
-- Внедрена выделенная колонка с чекбоксами выбора строк для ответа (с поддержкой bulk-выбора/снятия в шапке и состояния indeterminate), визуально отделённая от встроенных элементов управления Ozon.
-- Разработан content script `seller_content.js` для автоматического заполнения форм отзывов на Ozon Seller с использованием нативного сеттера React и автоматического поиска кнопки отправки.
-- Реализована многоуровневая защита от дублирования ответов: блокировка выбора шаблонов для отвеченных отзывов, визуальная заглушка «Уже отвечено» и повторная пред-проверка ответов непосредственно перед отправкой.
-- Внедрён выпадающий список выбора шаблонов в шапке оверлея для массового применения шаблона ко всем отмеченным строкам (с автоматическим сбросом выбора в «Не выбран»).
+### Features
+- Add DeepSeek AI integration for Ozon question answering.
+- Add AI Questions tab with API key validation in popup.
+- Add balance dashboard with currency conversion and token stats.
+- Add system prompt editor with variable placeholders chips.
+- Add AI assistant card to Ozon question drawer.
+- Add batch answering mode for selected table questions.
+- Add response mode selector to question table headers and rows.
+- Add auto-save for system prompt on blur and input.
 
-#### Refactor & Fixes
-- Вынести reply-контролы в отдельную колонку сразу после нативной «Ответы».
-- Расширить колонку ответов и удерживать селекторы на одной строке с данными.
-- Выровнять селекторы и чекбоксы ответов по одной строке с содержимым таблицы.
-- Устранить скачки и дублирование reply-контролов при перерисовке таблицы Seller Reviews.
-- Синхронизировать шаблоны popup с открытой вкладкой отзывов после сохранения и удаления.
-- Добавить нейтральный шаблон для ответа всем выбранным отзывам при пустом списке.
-- Исправить заполнение bulk-списка шаблонов через правильный DOM-элемент.
-- Архитектурный рефакторинг: прямой ввод <td>/<th> в DOM таблицы заменен на оверлей с абсолютным позиционированием (`#opt-ext-checkbox-overlay`) для предотвращения конфликтов VDOM во Vue 2 SPA.
-- Настроен раздельный поиск таблиц: `headerTable` (для считывания заголовков) и `rowsTable` (для строк данных) для поддержки липкой (sticky) шапки.
-- Реализован пересчёт координат оверлеев с помощью `requestAnimationFrame` и захвата событий прокрутки на всех родительских overflow-контейнерах.
-- Устранено зацикливание MutationObserver за счет фильтрации мутаций, инициируемых элементами расширения.
-- Сдвинуты чекбоксы оверлея налево относительно нативных чекбоксов Ozon с поддержкой fallback-сдвига направо при нехватке места.
-- Предотвращено пересечение ключей строк (`rowId`) путем добавления DOM-индекса строки.
-- Исправлено форматирование тегов `<br/>` в Rich-контенте: HTML-теги и переносы строк теперь преобразуются в чистые символы переноса `\n` для корректного отображения в Rich Content Ozon JSON.
-- Добавлен путь .agents/ в .gitignore.
+### Fixes
+- Fix AI buttons to prevent auto-send on generate click.
+- Fix modal drawer parser with exact Ozon Seller selectors.
+- Fix plain-text formatting by cleaning Markdown syntax from AI.
+- Fix variable replacement for product, brand, SKU and question.
+- Fix question selection by disabling answered row checkboxes.
+- Fix DeepSeek API requests with abort signal network timeouts.
+- Fix cost calculation with distinct rates for DeepSeek R1.
