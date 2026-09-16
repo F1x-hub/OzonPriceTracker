@@ -404,6 +404,142 @@ textarea:focus {
     background: white;
 }
 
+.citilink-btn {
+    background-color: #ff6b00;
+}
+
+.citilink-btn:hover {
+    background-color: #e85f00;
+}
+
+.citilink-brand-color {
+    color: #ff6b00 !important;
+}
+
+.citilink-progress-track {
+    height: 8px;
+    overflow: hidden;
+    border-radius: 999px;
+    background: #ffe7d1;
+}
+
+.citilink-progress-bar {
+    width: 0;
+    height: 100%;
+    border-radius: inherit;
+    background: #ff6b00;
+    transition: width 0.2s ease;
+}
+
+.citilink-table-header,
+.citilink-item {
+    display: grid;
+    grid-template-columns: 0.9fr 1.2fr 0.7fr 0.9fr;
+    gap: 8px;
+    align-items: center;
+}
+
+.citilink-table-header {
+    margin-top: 15px;
+    padding: 10px;
+    border-radius: 6px 6px 0 0;
+    background: #fff1e6;
+    color: #d95700;
+    font-size: 11px;
+    font-weight: bold;
+}
+
+.citilink-results-list {
+    max-height: 330px;
+    overflow-y: auto;
+    border: 1px solid #ffe7d1;
+    border-top: none;
+    border-radius: 0 0 6px 6px;
+    background: white;
+}
+
+.citilink-item {
+    grid-template-areas:
+        "article brand photo status"
+        "details details details details";
+    padding: 8px 10px;
+    border-bottom: 1px solid #eee;
+    font-size: 12px;
+}
+
+.citilink-item:last-child {
+    border-bottom: none;
+}
+
+.citilink-article {
+    grid-area: article;
+    color: #555;
+    font-weight: 600;
+}
+
+.citilink-brand {
+    grid-area: brand;
+    overflow: hidden;
+    color: #333;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.citilink-photo {
+    grid-area: photo;
+    color: #555;
+    white-space: nowrap;
+}
+
+.citilink-status {
+    grid-area: status;
+    text-align: right;
+    font-size: 11px;
+    font-weight: 600;
+}
+
+.citilink-status.done {
+    color: #16a34a;
+}
+
+.citilink-status.error {
+    color: #dc3545;
+}
+
+.citilink-status.processing,
+.citilink-status.searching {
+    color: #d95700;
+}
+
+.citilink-details {
+    grid-area: details;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    min-width: 0;
+}
+
+.citilink-name,
+.citilink-description,
+.citilink-error {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.citilink-name {
+    color: #333;
+    font-weight: 600;
+}
+
+.citilink-description {
+    color: #666;
+}
+
+.citilink-error {
+    color: #dc3545;
+}
+
 /* Reviews Tab Styles */
 .settings-box {
     background: white;

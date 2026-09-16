@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Ozon Price Tracker",
   "version": "1.0.2",
-  "description": "Мониторинг цен на товары Ozon.ru и Wildberries",
+  "description": "Мониторинг цен на товары Ozon.ru и Wildberries, сбор товаров Citilink для Avito",
   "permissions": [
     "storage",
     "alarms",
@@ -13,6 +13,7 @@
   "host_permissions": [
     "https://www.ozon.ru/*",
     "https://www.wildberries.ru/*",
+    "https://www.citilink.ru/*",
     "https://seller.ozon.ru/*",
     "https://api.deepseek.com/*"
   ],
@@ -48,6 +49,15 @@
       ],
       "js": [
         "seller_content.js"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://www.citilink.ru/*"
+      ],
+      "js": [
+        "citilink_content.js"
       ],
       "run_at": "document_idle"
     }

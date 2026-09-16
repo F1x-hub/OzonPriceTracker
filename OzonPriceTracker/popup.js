@@ -14,6 +14,17 @@ document.addEventListener('DOMContentLoaded', () => {
     const wbExportBtn = document.getElementById('wbExportBtn');
     const wbClearBtn = document.getElementById('wbClearBtn');
     const wbTrackedItemsList = document.getElementById('wbTrackedItemsList');
+
+    // Citilink elements
+    const citilinkArticlesInput = document.getElementById('citilinkArticles');
+    const citilinkStartBtn = document.getElementById('citilinkStartBtn');
+    const citilinkExportBtn = document.getElementById('citilinkExportBtn');
+    const citilinkClearBtn = document.getElementById('citilinkClearBtn');
+    const citilinkResultsList = document.getElementById('citilinkResultsList');
+    const citilinkProgressContainer = document.getElementById('citilinkProgressContainer');
+    const citilinkProgressText = document.getElementById('citilinkProgressText');
+    const citilinkProgressPercent = document.getElementById('citilinkProgressPercent');
+    const citilinkProgressBar = document.getElementById('citilinkProgressBar');
     
     // Progress Bar elements
     const wbProgressContainer = document.getElementById('wbProgressContainer');
@@ -116,6 +127,7 @@ document.addEventListener('DOMContentLoaded', () => {
     updateLastCheckTime();
     loadInterval();
     loadWbState();
+    loadCitilinkState();
 
     saveIntervalBtn.addEventListener('click', () => {
         const newInterval = parseInt(checkIntervalInput.value, 10);
@@ -323,6 +335,171 @@ document.addEventListener('DOMContentLoaded', () => {
                    .filter(s => /^\d+$/.test(s));
     }
 
+    // --- Citilink Product Export Logic ---
+
+    citilinkStartBtn.addEventListener('click', () => {
+        const articles = parseCitilinkArticles(citilinkArticlesInput.value);
+        if (articles.length === 0) {
+            alert('Введите хотя бы один код товара Citilink');
+            return;
+        }
+
+        citilinkStartBtn.disabled = true;
+        citilinkStartBtn.textContent = 'Обработка...';
+        chrome.runtime.sendMessage({ action: 'fetchCitilinkProducts', articles }, response => {
+            if (chrome.runtime.lastError) {
+                alert(`Не удалось запустить обработку: ${chrome.runtime.lastError.message}`);
+                updateCitilinkProgress({ total: 0, done: 0, running: false });
+                return;
+            }
+            console.log('Citilink fetch started:', response);
+        });
+    });
+
+    citilinkExportBtn.addEventListener('click', () => {
+        chrome.storage.local.get({ citilinkLastResults: {} }, result => {
+            const items = Object.values(result.citilinkLastResults || {});
+            if (items.length === 0) {
+                alert('Нет данных для экспорта');
+                return;
+            }
+
+            const data = [[
+                'Код товара',
+                'Бренд',
+                'Название товара',
+                'Описание для Avito',
+                'Ссылки на картинки',
+                'Количество фото',
+                'Статус'
+            ]];
+
+            items.forEach(item => {
+                data.push([
+                    item.article || '',
+                    item.brand || '',
+                    item.name || '',
+                    item.description || '',
+                    (item.imageUrls || []).join(' | '),
+                    getCitilinkImageCount(item),
+                    item.status === 'done' ? 'Готово' : (item.error || 'В обработке')
+                ]);
+            });
+
+            const workbook = XLSX.utils.book_new();
+            const worksheet = XLSX.utils.aoa_to_sheet(data);
+            worksheet['!cols'] = [
+                { wch: 14 },
+                { wch: 16 },
+                { wch: 42 },
+                { wch: 70 },
+                { wch: 45 },
+                { wch: 16 },
+                { wch: 32 }
+            ];
+            XLSX.utils.book_append_sheet(workbook, worksheet, 'Citilink');
+
+            const date = new Date().toISOString().split('T')[0];
+            XLSX.writeFile(workbook, `citilink_avito_${date}.xlsx`);
+        });
+    });
+
+    citilinkClearBtn.addEventListener('click', () => {
+        if (!confirm('Очистить результаты Citilink?')) return;
+
+        chrome.storage.local.set({
+            citilinkLastResults: {},
+            citilinkStatus: { total: 0, done: 0, running: false, phase: 'idle', error: '' }
+        }, () => {
+            renderCitilinkResults({});
+            updateCitilinkProgress({ total: 0, done: 0, running: false });
+        });
+    });
+
+    function parseCitilinkArticles(text) {
+        return Array.from(new Set(String(text || '')
+            .split(/[\s,;]+/)
+            .map(value => value.trim())
+            .filter(value => /^\d+$/.test(value))));
+    }
+
+    function getCitilinkImageCount(item) {
+        const storedCount = Number(item?.imageCount);
+        if (Number.isFinite(storedCount) && storedCount >= 0) {
+            return Math.floor(storedCount);
+        }
+
+        return Array.isArray(item?.imageUrls) ? item.imageUrls.length : 0;
+    }
+
+    function loadCitilinkState() {
+        chrome.storage.local.get({
+            citilinkLastResults: {},
+            citilinkStatus: { total: 0, done: 0, running: false, phase: 'idle', error: '' }
+        }, result => {
+            renderCitilinkResults(result.citilinkLastResults);
+            updateCitilinkProgress(result.citilinkStatus);
+        });
+    }
+
+    function renderCitilinkResults(results) {
+        citilinkResultsList.innerHTML = '';
+        if (!results || Object.keys(results).length === 0) {
+            citilinkResultsList.innerHTML = '<div class="empty-message">Нет результатов Citilink</div>';
+            return;
+        }
+
+        const statusLabels = {
+            searching: 'Поиск товара',
+            processing: 'Обработка AI',
+            done: 'Готово',
+            error: 'Ошибка'
+        };
+
+        Object.values(results).forEach(item => {
+            const row = document.createElement('div');
+            row.className = 'citilink-item';
+            const status = statusLabels[item.status] || 'Ожидание';
+            const detail = item.status === 'error' ? item.error : item.description;
+            row.innerHTML = `
+                <div class="citilink-article">${escapeHtml(item.article || '')}</div>
+                <div class="citilink-brand">${escapeHtml(item.brand || '—')}</div>
+                <div class="citilink-photo">Фото: ${getCitilinkImageCount(item)}</div>
+                <div class="citilink-status ${item.status || 'pending'}">${escapeHtml(status)}</div>
+                <div class="citilink-details">
+                    <div class="citilink-name">${escapeHtml(item.name || '')}</div>
+                    ${detail ? `<div class="citilink-description">${escapeHtml(detail)}</div>` : ''}
+                </div>
+            `;
+            citilinkResultsList.appendChild(row);
+        });
+    }
+
+    function updateCitilinkProgress(status) {
+        const total = Number(status?.total) || 0;
+        const done = Math.min(Number(status?.done) || 0, total);
+        if (total === 0) {
+            citilinkProgressContainer.style.display = 'none';
+            citilinkStartBtn.disabled = false;
+            citilinkStartBtn.textContent = 'Собрать и обработать';
+            return;
+        }
+
+        citilinkProgressContainer.style.display = 'block';
+        citilinkProgressText.textContent = `Обработано: ${done} из ${total}`;
+        const percent = Math.round((done / total) * 100);
+        citilinkProgressPercent.textContent = `${percent}%`;
+        citilinkProgressBar.style.width = `${percent}%`;
+
+        if (status.running) {
+            citilinkStartBtn.disabled = true;
+            citilinkStartBtn.textContent = 'Обработка...';
+        } else {
+            citilinkStartBtn.disabled = false;
+            citilinkStartBtn.textContent = 'Собрать и обработать';
+        }
+    }
+
     // --- History Logic ---
     function loadHistory() {
         chrome.storage.local.get({ notificationHistory: [] }, (result) => {
@@ -391,6 +568,12 @@ document.addEventListener('DOMContentLoaded', () => {
             }
             if (changes.wbStatus) {
                 updateWbProgress(changes.wbStatus.newValue);
+            }
+            if (changes.citilinkLastResults) {
+                renderCitilinkResults(changes.citilinkLastResults.newValue);
+            }
+            if (changes.citilinkStatus) {
+                updateCitilinkProgress(changes.citilinkStatus.newValue);
             }
             if (changes.ozonReplyTemplates) {
                 renderReplyTemplates(changes.ozonReplyTemplates.newValue);
@@ -605,6 +788,23 @@ document.addEventListener('DOMContentLoaded', () => {
 4. Ответ должен быть лаконичным, уверенным и доброжелательным (2-5 предложений).
 5. Завершай ответ пожеланием приятных покупок или отличного настроения.`;
 
+    const DEFAULT_REVIEW_PROMPT = `Ты — вежливый и внимательный представитель магазина на Ozon. Твоя задача — ответить на отзыв покупателя о товаре.
+Правила:
+1. Поблагодари покупателя за отзыв и обратись к сути его впечатления.
+2. Отвечай доброжелательно и профессионально, не спорь с покупателем и не выдумывай факты.
+3. Если отзыв негативный, признай неудобство и предложи обратиться в поддержку магазина для решения вопроса.
+4. Ответ должен быть лаконичным — 2-4 предложения, без markdown-разметки и служебных комментариев.
+5. Заверши ответ пожеланием приятных покупок.`;
+
+    const DEFAULT_CITILINK_PROMPT = `Ты — редактор объявлений для Avito.
+Подготовь только готовое описание товара на русском языке на основе данных Citilink.
+Правила:
+1. Не выдумывай характеристики, комплектацию, цену, наличие и преимущества, которых нет в исходных данных.
+2. Сохрани важные технические характеристики, модель и бренд.
+3. Сделай текст понятным, аккуратным и подходящим для объявления Avito.
+4. Не добавляй заголовок, цену, ссылки, служебные комментарии и markdown-разметку.
+5. Верни только итоговый текст описания.`;
+
     const deepseekStatusBadge = document.getElementById('deepseekStatusBadge');
     const deepseekApiKeyInput = document.getElementById('deepseekApiKey');
     const toggleApiKeyVisibilityBtn = document.getElementById('toggleApiKeyVisibility');
@@ -619,6 +819,10 @@ document.addEventListener('DOMContentLoaded', () => {
     const resetStatsBtn = document.getElementById('resetStatsBtn');
     const resetPromptBtn = document.getElementById('resetPromptBtn');
     const deepseekSystemPrompt = document.getElementById('deepseekSystemPrompt');
+    const resetReviewPromptBtn = document.getElementById('resetReviewPromptBtn');
+    const deepseekReviewPrompt = document.getElementById('deepseekReviewPrompt');
+    const resetCitilinkPromptBtn = document.getElementById('resetCitilinkPromptBtn');
+    const deepseekCitilinkPrompt = document.getElementById('deepseekCitilinkPrompt');
     const promptChips = document.querySelectorAll('.prompt-chip');
     const deepseekAutoSendCheck = document.getElementById('deepseekAutoSend');
     const deepseekModelSelect = document.getElementById('deepseekModelSelect');
@@ -704,26 +908,92 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
+    if (deepseekReviewPrompt) {
+        let reviewPromptTimeout = null;
+        const saveReviewPrompt = () => {
+            const val = (deepseekReviewPrompt.value || '').trim() || DEFAULT_REVIEW_PROMPT;
+            chrome.storage.local.set({ deepseekReviewPrompt: val });
+        };
+
+        deepseekReviewPrompt.addEventListener('input', () => {
+            clearTimeout(reviewPromptTimeout);
+            reviewPromptTimeout = setTimeout(saveReviewPrompt, 500);
+        });
+        deepseekReviewPrompt.addEventListener('blur', () => {
+            clearTimeout(reviewPromptTimeout);
+            saveReviewPrompt();
+        });
+    }
+
+    if (deepseekCitilinkPrompt) {
+        let citilinkPromptTimeout = null;
+        const saveCitilinkPrompt = () => {
+            const val = (deepseekCitilinkPrompt.value || '').trim() || DEFAULT_CITILINK_PROMPT;
+            chrome.storage.local.set({ deepseekCitilinkPrompt: val });
+        };
+
+        deepseekCitilinkPrompt.addEventListener('input', () => {
+            clearTimeout(citilinkPromptTimeout);
+            citilinkPromptTimeout = setTimeout(saveCitilinkPrompt, 500);
+        });
+        deepseekCitilinkPrompt.addEventListener('blur', () => {
+            clearTimeout(citilinkPromptTimeout);
+            saveCitilinkPrompt();
+        });
+    }
+
     // Insert prompt chips into textarea
     promptChips.forEach(chip => {
         chip.addEventListener('click', () => {
             const tag = chip.getAttribute('data-chip');
-            if (!tag || !deepseekSystemPrompt) return;
-            const start = deepseekSystemPrompt.selectionStart;
-            const end = deepseekSystemPrompt.selectionEnd;
-            const text = deepseekSystemPrompt.value;
-            deepseekSystemPrompt.value = text.substring(0, start) + tag + text.substring(end);
-            deepseekSystemPrompt.focus();
-            deepseekSystemPrompt.setSelectionRange(start + tag.length, start + tag.length);
-            chrome.storage.local.set({ deepseekPrompt: deepseekSystemPrompt.value });
+            const targetType = chip.getAttribute('data-target');
+            const target = targetType === 'citilink'
+                ? deepseekCitilinkPrompt
+                : targetType === 'review'
+                    ? deepseekReviewPrompt
+                    : deepseekSystemPrompt;
+            if (!tag || !target) return;
+            const start = target.selectionStart;
+            const end = target.selectionEnd;
+            const text = target.value;
+            target.value = text.substring(0, start) + tag + text.substring(end);
+            target.focus();
+            target.setSelectionRange(start + tag.length, start + tag.length);
+            const storageKey = target === deepseekCitilinkPrompt
+                ? 'deepseekCitilinkPrompt'
+                : target === deepseekReviewPrompt
+                    ? 'deepseekReviewPrompt'
+                    : 'deepseekPrompt';
+            chrome.storage.local.set({
+                [storageKey]: target.value
+            });
         });
     });
 
     // Reset prompt button
     if (resetPromptBtn) {
         resetPromptBtn.addEventListener('click', () => {
-            if (confirm('Сбросить главный системный промпт на стандартный?')) {
+            if (confirm('Сбросить промпт ответов на вопросы на стандартный?')) {
                 deepseekSystemPrompt.value = DEFAULT_PROMPT;
+                chrome.storage.local.set({ deepseekPrompt: DEFAULT_PROMPT });
+            }
+        });
+    }
+
+    if (resetReviewPromptBtn) {
+        resetReviewPromptBtn.addEventListener('click', () => {
+            if (confirm('Сбросить промпт ответов на отзывы на стандартный?')) {
+                deepseekReviewPrompt.value = DEFAULT_REVIEW_PROMPT;
+                chrome.storage.local.set({ deepseekReviewPrompt: DEFAULT_REVIEW_PROMPT });
+            }
+        });
+    }
+
+    if (resetCitilinkPromptBtn) {
+        resetCitilinkPromptBtn.addEventListener('click', () => {
+            if (confirm('Сбросить промпт обработки Citilink на стандартный?')) {
+                deepseekCitilinkPrompt.value = DEFAULT_CITILINK_PROMPT;
+                chrome.storage.local.set({ deepseekCitilinkPrompt: DEFAULT_CITILINK_PROMPT });
             }
         });
     }
@@ -800,6 +1070,8 @@ document.addEventListener('DOMContentLoaded', () => {
         saveAllAiSettingsBtn.addEventListener('click', () => {
             const key = (deepseekApiKeyInput.value || '').trim();
             const prompt = (deepseekSystemPrompt.value || '').trim() || DEFAULT_PROMPT;
+            const reviewPrompt = (deepseekReviewPrompt.value || '').trim() || DEFAULT_REVIEW_PROMPT;
+            const citilinkPrompt = (deepseekCitilinkPrompt.value || '').trim() || DEFAULT_CITILINK_PROMPT;
             const model = getEffectiveModel();
             const autoSend = deepseekAutoSendCheck.checked;
             const delay = parseInt(deepseekDelayInput.value, 10) || 3;
@@ -807,6 +1079,8 @@ document.addEventListener('DOMContentLoaded', () => {
             chrome.storage.local.set({
                 deepseekApiKey: key,
                 deepseekPrompt: prompt,
+                deepseekReviewPrompt: reviewPrompt,
+                deepseekCitilinkPrompt: citilinkPrompt,
                 deepseekModel: model,
                 deepseekAutoSend: autoSend,
                 deepseekDelay: delay
@@ -902,6 +1176,8 @@ document.addEventListener('DOMContentLoaded', () => {
         chrome.storage.local.get({
             deepseekApiKey: '',
             deepseekPrompt: DEFAULT_PROMPT,
+            deepseekReviewPrompt: DEFAULT_REVIEW_PROMPT,
+            deepseekCitilinkPrompt: DEFAULT_CITILINK_PROMPT,
             deepseekModel: 'deepseek-chat',
             deepseekAutoSend: false,
             deepseekDelay: 3,
@@ -916,6 +1192,8 @@ document.addEventListener('DOMContentLoaded', () => {
         }, (res) => {
             if (deepseekApiKeyInput) deepseekApiKeyInput.value = res.deepseekApiKey || '';
             if (deepseekSystemPrompt) deepseekSystemPrompt.value = res.deepseekPrompt || DEFAULT_PROMPT;
+            if (deepseekReviewPrompt) deepseekReviewPrompt.value = res.deepseekReviewPrompt || DEFAULT_REVIEW_PROMPT;
+            if (deepseekCitilinkPrompt) deepseekCitilinkPrompt.value = res.deepseekCitilinkPrompt || DEFAULT_CITILINK_PROMPT;
 
             const storedModel = res.deepseekModel || 'deepseek-chat';
             const standardModels = ['deepseek-chat', 'deepseek-reasoner', 'deepseek-v3', 'deepseek-coder', 'deepseek-v2.5'];

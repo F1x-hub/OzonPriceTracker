@@ -12,6 +12,112 @@
         return new Promise(resolve => setTimeout(resolve, ms));
     }
 
+    function makeFloatingPanelDraggable(panel, handle, storageKey) {
+        if (!panel || !handle || handle.dataset.optExtDraggable === 'true') return;
+
+        handle.dataset.optExtDraggable = 'true';
+        handle.classList.add('opt-ext-draggable-handle');
+        handle.title = 'Перетащите панель за заголовок';
+
+        let dragState = null;
+        let hasUserMovedPanel = false;
+
+        const setPanelPosition = (left, top) => {
+            const rect = panel.getBoundingClientRect();
+            const margin = 8;
+            const maxLeft = Math.max(margin, window.innerWidth - rect.width - margin);
+            const maxTop = Math.max(margin, window.innerHeight - rect.height - margin);
+            const nextLeft = Math.min(Math.max(left, margin), maxLeft);
+            const nextTop = Math.min(Math.max(top, margin), maxTop);
+
+            panel.style.setProperty('left', `${nextLeft}px`, 'important');
+            panel.style.setProperty('top', `${nextTop}px`, 'important');
+            panel.style.setProperty('right', 'auto', 'important');
+            panel.style.setProperty('bottom', 'auto', 'important');
+        };
+
+        const savePanelPosition = () => {
+            if (!storageKey || !chrome.storage?.local) return;
+
+            const rect = panel.getBoundingClientRect();
+            chrome.storage.local.set({
+                [storageKey]: {
+                    left: Math.round(rect.left),
+                    top: Math.round(rect.top)
+                }
+            });
+        };
+
+        const restorePanelPosition = () => {
+            if (!storageKey || !chrome.storage?.local) return;
+
+            chrome.storage.local.get([storageKey], (result) => {
+                if (hasUserMovedPanel) return;
+
+                const savedPosition = result?.[storageKey];
+                if (!savedPosition
+                    || !Number.isFinite(savedPosition.left)
+                    || !Number.isFinite(savedPosition.top)) {
+                    return;
+                }
+
+                setPanelPosition(savedPosition.left, savedPosition.top);
+            });
+        };
+
+        const stopDragging = (event) => {
+            if (!dragState || event.pointerId !== dragState.pointerId) return;
+
+            if (handle.hasPointerCapture?.(event.pointerId)) {
+                handle.releasePointerCapture(event.pointerId);
+            }
+            if (dragState.moved) {
+                savePanelPosition();
+            }
+            handle.classList.remove('is-dragging');
+            dragState = null;
+        };
+
+        handle.addEventListener('pointerdown', (event) => {
+            if (!event.isPrimary || (event.button !== undefined && event.button !== 0)) return;
+            if (event.target.closest('button, input, select, textarea, a')) return;
+
+            const rect = panel.getBoundingClientRect();
+            dragState = {
+                pointerId: event.pointerId,
+                offsetX: event.clientX - rect.left,
+                offsetY: event.clientY - rect.top,
+                moved: false
+            };
+
+            handle.setPointerCapture?.(event.pointerId);
+            handle.classList.add('is-dragging');
+            event.preventDefault();
+        });
+
+        handle.addEventListener('pointermove', (event) => {
+            if (!dragState || event.pointerId !== dragState.pointerId) return;
+
+            const rect = panel.getBoundingClientRect();
+            const nextLeft = event.clientX - dragState.offsetX;
+            const nextTop = event.clientY - dragState.offsetY;
+            dragState.moved = dragState.moved
+                || Math.abs(nextLeft - rect.left) > 2
+                || Math.abs(nextTop - rect.top) > 2;
+
+            if (dragState.moved) {
+                hasUserMovedPanel = true;
+                setPanelPosition(nextLeft, nextTop);
+                event.preventDefault();
+            }
+        });
+
+        handle.addEventListener('pointerup', stopDragging);
+        handle.addEventListener('pointercancel', stopDragging);
+
+        restorePanelPosition();
+    }
+
     function cleanRichContentText(text) {
         if (!text) return '';
         let result = text;
@@ -91,6 +197,7 @@
         title: 'Ответить на все выбранные отзывы',
         text: 'Благодарим за обратную связь!'
     });
+    const DEEPSEEK_AI_TEMPLATE_ID = 'deepseek_ai';
 
     let rowStates = new Map();
     let overlayElements = new Map();
@@ -221,6 +328,7 @@
         floatBtn.addEventListener('click', handleFloatBtnClick);
         floatBtnContainer.append(panelHeader, selectionSummary, floatBtn);
         document.body.appendChild(floatBtnContainer);
+        makeFloatingPanelDraggable(floatBtnContainer, panelHeader, 'optExtReviewsPanelPosition');
 
         // 2. Overlay container
         overlayContainer = document.createElement('div');
@@ -337,7 +445,12 @@
 
     function getQueueItems() {
         return Array.from(rowStates.entries())
-            .filter(([_, state]) => state.checked && state.templateId && state.repliesCount === 0)
+            .filter(([_, state]) => (
+                state.checked &&
+                state.templateId &&
+                state.repliesCount === 0 &&
+                (state.templateId !== DEEPSEEK_AI_TEMPLATE_ID || state.hasReviewText)
+            ))
             .map(([rowId, state]) => ({ rowId, ...state }));
     }
 
@@ -552,10 +665,16 @@
                         checked: false,
                         templateId: '',
                         templateText: '',
-                        repliesCount: rowData.repliesCount
+                        repliesCount: rowData.repliesCount,
+                        hasReviewText: Boolean(rowData.reviewText)
                     });
                 } else {
                     const st = rowStates.get(rowData.rowId);
+                    st.hasReviewText = Boolean(rowData.reviewText);
+                    if (!st.hasReviewText && st.templateId === DEEPSEEK_AI_TEMPLATE_ID) {
+                        st.templateId = '';
+                        st.templateText = '';
+                    }
                     if (st.repliesCount !== rowData.repliesCount) {
                         st.repliesCount = rowData.repliesCount;
                         if (rowData.repliesCount > 0) {
@@ -709,6 +828,26 @@
         return found || candidates[0] || null;
     }
 
+    function normalizeReviewText(value) {
+        return String(value || '').replace(/\s+/g, ' ').trim();
+    }
+
+    function isRatingOnlyReviewText(value) {
+        const normalized = normalizeReviewText(value).toLowerCase();
+        return /^(?:[-–—]\s*)?только с оценкой$/.test(normalized);
+    }
+
+    function extractReviewText(reviewCell) {
+        if (!reviewCell) return '';
+
+        const cellText = normalizeReviewText(reviewCell.textContent);
+        if (isRatingOnlyReviewText(cellText)) return '';
+
+        const titleEl = getReviewTextElement(reviewCell);
+        const titleText = normalizeReviewText(titleEl?.getAttribute('title'));
+        return titleText || cellText;
+    }
+
     function getRowData(tr, i = 0) {
         const cells = tr.querySelectorAll('td');
         if (cells.length === 0) return null;
@@ -719,8 +858,7 @@
         let dateText = '';
 
         if (reviewColIndex !== -1 && cells[reviewColIndex]) {
-            const titleEl = getReviewTextElement(cells[reviewColIndex]);
-            reviewText = titleEl ? titleEl.getAttribute('title').trim() : cells[reviewColIndex].textContent.trim();
+            reviewText = extractReviewText(cells[reviewColIndex]);
         }
 
         if (repliesColIndex !== -1 && cells[repliesColIndex]) {
@@ -751,6 +889,11 @@
         defaultOpt.textContent = 'Не выбран';
         select.appendChild(defaultOpt);
 
+        const aiOpt = document.createElement('option');
+        aiOpt.value = DEEPSEEK_AI_TEMPLATE_ID;
+        aiOpt.textContent = '✨ DeepSeek AI';
+        select.appendChild(aiOpt);
+
         savedTemplates.forEach(tpl => {
             const opt = document.createElement('option');
             opt.value = tpl.id;
@@ -759,7 +902,13 @@
         });
 
         if (rowStates.has(rowId)) {
-            select.value = rowStates.get(rowId).templateId;
+            const state = rowStates.get(rowId);
+            const aiOption = select.querySelector(`option[value="${DEEPSEEK_AI_TEMPLATE_ID}"]`);
+            if (aiOption) {
+                aiOption.disabled = !state.hasReviewText;
+                aiOption.title = state.hasReviewText ? '' : 'У отзыва нет текста';
+            }
+            select.value = state.templateId;
         } else {
             select.value = '';
         }
@@ -774,6 +923,11 @@
         defaultOpt.value = '';
         defaultOpt.textContent = 'Применить...';
         bulkSelect.appendChild(defaultOpt);
+
+        const aiOpt = document.createElement('option');
+        aiOpt.value = DEEPSEEK_AI_TEMPLATE_ID;
+        aiOpt.textContent = '✨ DeepSeek AI';
+        bulkSelect.appendChild(aiOpt);
 
         savedTemplates.forEach(tpl => {
             const opt = document.createElement('option');
@@ -795,12 +949,30 @@
             return;
         }
 
-        const tpl = savedTemplates.find(t => t.id === templateId);
-        if (tpl) {
-            checkedRows.forEach(([_, state]) => {
-                state.templateId = tpl.id;
-                state.templateText = tpl.text;
+        if (templateId === DEEPSEEK_AI_TEMPLATE_ID) {
+            const rowsWithText = checkedRows.filter(([_, state]) => state.hasReviewText);
+            if (rowsWithText.length === 0) {
+                alert('DeepSeek доступен только для отзывов с текстом.');
+                e.target.value = '';
+                return;
+            }
+
+            if (rowsWithText.length < checkedRows.length) {
+                alert(`DeepSeek назначен только для ${rowsWithText.length} отзывов с текстом. Строки «Только с оценкой» пропущены.`);
+            }
+
+            rowsWithText.forEach(([_, state]) => {
+                state.templateId = DEEPSEEK_AI_TEMPLATE_ID;
+                state.templateText = '';
             });
+        } else {
+            const tpl = savedTemplates.find(t => t.id === templateId);
+            if (tpl) {
+                checkedRows.forEach(([_, state]) => {
+                    state.templateId = tpl.id;
+                    state.templateText = tpl.text;
+                });
+            }
         }
 
         e.target.value = '';
@@ -830,6 +1002,16 @@
 
         if (!templateId) {
             state.templateId = '';
+            state.templateText = '';
+        } else if (templateId === DEEPSEEK_AI_TEMPLATE_ID) {
+            if (!state.hasReviewText) {
+                e.target.value = '';
+                state.templateId = '';
+                state.templateText = '';
+                updateFloatBtn();
+                return;
+            }
+            state.templateId = DEEPSEEK_AI_TEMPLATE_ID;
             state.templateText = '';
         } else {
             const tpl = savedTemplates.find(t => t.id === templateId);
@@ -919,6 +1101,7 @@
     async function startSending() {
         isRunning = true;
         failedReplies = [];
+        const skippedReplies = [];
         updateFloatBtn();
 
         const itemsToSend = getQueueItems();
@@ -927,14 +1110,21 @@
             if (!isRunning) break;
 
             const item = itemsToSend[i];
-            let success = false;
+            let result = false;
 
             try {
-                success = await sendSingleReply(item);
+                result = await sendSingleReply(item);
             } catch (err) {
                 console.error("Error processing row:", item.rowId, err);
             }
 
+            if (result === 'skipped') {
+                skippedReplies.push(item);
+                requestReposition();
+                continue;
+            }
+
+            const success = result === true;
             if (success) {
                 const state = rowStates.get(item.rowId);
                 if (state) {
@@ -965,9 +1155,26 @@
         if (failedReplies.length > 0) {
             const details = failedReplies.map(f => f.rowId.split('::')[0] || 'Отзыв').join('\n');
             alert(`Отправка завершена.\nНе удалось отправить автоответы на следующие отзывы:\n\n${details}`);
+        } else if (skippedReplies.length > 0) {
+            alert(`Пропущено отзывов без текста: ${skippedReplies.length}. Выберите строки с текстом отзыва.`);
         } else {
             alert('Все автоответы успешно отправлены!');
         }
+    }
+
+    function requestDeepSeekReviewAnswer(data) {
+        return new Promise(resolve => {
+            chrome.runtime.sendMessage({
+                action: 'deepseek_generate_review_answer',
+                data
+            }, response => {
+                if (chrome.runtime.lastError) {
+                    resolve({ success: false, error: chrome.runtime.lastError.message });
+                    return;
+                }
+                resolve(response || { success: false, error: 'Пустой ответ от DeepSeek' });
+            });
+        });
     }
 
     async function sendSingleReply(item) {
@@ -993,6 +1200,17 @@
                 return true;
             }
 
+            if (item.templateId === DEEPSEEK_AI_TEMPLATE_ID && !rowData?.reviewText?.trim()) {
+                const state = rowStates.get(item.rowId);
+                if (state) {
+                    state.checked = false;
+                    state.templateId = '';
+                    state.templateText = '';
+                }
+                console.warn('[opt-ext] Пропуск отзыва без текста:', item.rowId);
+                return 'skipped';
+            }
+
             tr.scrollIntoView({ block: 'center' });
             await sleep(500);
 
@@ -1011,7 +1229,28 @@
             const textarea = document.querySelector('#AnswerCommentForm');
             if (!textarea) return false;
 
-            setNativeValue(textarea, item.templateText);
+            let answerText = item.templateText || '';
+            if (item.templateId === DEEPSEEK_AI_TEMPLATE_ID) {
+                const aiResponse = await requestDeepSeekReviewAnswer({
+                    product: rowData?.productText || '',
+                    review: rowData?.reviewText || '',
+                    date: rowData?.dateText || ''
+                });
+                if (!aiResponse.success || !aiResponse.answer?.trim()) {
+                    console.error('[opt-ext] Ошибка генерации ответа на отзыв:', aiResponse.error || 'Пустой ответ');
+                    const closeBtn = findCloseButton(textarea);
+                    if (closeBtn) closeBtn.click();
+                    return false;
+                }
+                answerText = aiResponse.answer.trim();
+            }
+
+            if (!answerText.trim()) {
+                const closeBtn = findCloseButton(textarea);
+                if (closeBtn) closeBtn.click();
+                return false;
+            }
+            setNativeValue(textarea, answerText);
 
             let parent = textarea.parentElement;
             let submitBtn = null;
@@ -2544,6 +2783,7 @@
 
         questionsFloatContainer.append(header, questionsSelectionSummary, questionsBulkBtn);
         document.body.appendChild(questionsFloatContainer);
+        makeFloatingPanelDraggable(questionsFloatContainer, header, 'optExtQuestionsPanelPosition');
     }
 
     function updateQuestionsSelectionSummary() {

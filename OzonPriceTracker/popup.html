@@ -9,6 +9,7 @@
     <div class="tabs">
         <button class="tab-btn active" data-tab="tracking-tab">Ozon</button>
         <button class="tab-btn" data-tab="wb-tab">Wildberries</button>
+        <button class="tab-btn" data-tab="citilink-tab">Citilink</button>
         <button class="tab-btn" data-tab="reviews-tab">Ответы</button>
         <button class="tab-btn" data-tab="ai-questions-tab">Вопросы AI</button>
         <button class="tab-btn" data-tab="history-tab">История</button>
@@ -94,6 +95,45 @@
         </div>
         <div id="wbTrackedItemsList">
             <!-- WB results will be injected here -->
+        </div>
+    </div>
+
+    <div class="container tab-content" id="citilink-tab">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+            <h2 class="citilink-brand-color" style="margin: 0;">Citilink</h2>
+            <div style="display: flex; gap: 5px;">
+                <button id="citilinkExportBtn" class="citilink-btn" style="padding: 5px 10px; font-size: 11px;">Excel</button>
+                <button id="citilinkClearBtn" style="padding: 5px 10px; font-size: 11px; background-color: #6c757d;">Очистить</button>
+            </div>
+        </div>
+
+        <div class="form-group">
+            <textarea id="citilinkArticles" placeholder="Коды товаров Citilink (через пробел, запятую или с новой строки)
+Пример:
+2160826
+2143912" rows="6"></textarea>
+        </div>
+
+        <button id="citilinkStartBtn" class="citilink-btn">Собрать и обработать</button>
+
+        <div id="citilinkProgressContainer" style="display: none; margin-top: 15px;">
+            <div style="display: flex; justify-content: space-between; font-size: 11px; margin-bottom: 4px;">
+                <span id="citilinkProgressText">Обработано: 0 из 0</span>
+                <span id="citilinkProgressPercent">0%</span>
+            </div>
+            <div class="citilink-progress-track">
+                <div id="citilinkProgressBar" class="citilink-progress-bar"></div>
+            </div>
+        </div>
+
+        <div class="citilink-table-header">
+            <span>Артикул</span>
+            <span>Бренд</span>
+            <span>Фото</span>
+            <span>Статус</span>
+        </div>
+        <div id="citilinkResultsList" class="citilink-results-list">
+            <!-- Citilink results will be injected here -->
         </div>
     </div>
 
@@ -196,7 +236,7 @@
         <!-- Main System Prompt -->
         <div class="settings-box ai-card">
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
-                <label style="font-size: 12px; font-weight: 700; color: #222;">Главный системный промпт</label>
+                <label style="font-size: 12px; font-weight: 700; color: #222;">Промпт ответов на вопросы</label>
                 <button id="resetPromptBtn" style="background: none; border: none; color: #005bff; font-size: 11px; cursor: pointer; font-weight: 600; padding: 0;">Сброс</button>
             </div>
             <div style="font-size: 11px; color: #666; margin-bottom: 6px;">Определяет роль, поведение и правила формулировки ответов:</div>
@@ -208,6 +248,40 @@
                 <button type="button" class="prompt-chip" data-chip="{sku}">{sku}</button>
                 <button type="button" class="prompt-chip" data-chip="{question}">{question}</button>
                 <button type="button" class="prompt-chip" data-chip="{buyer}">{buyer}</button>
+            </div>
+        </div>
+
+        <!-- Review Reply Prompt -->
+        <div class="settings-box ai-card">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                <label style="font-size: 12px; font-weight: 700; color: #222;">Промпт ответов на отзывы</label>
+                <button id="resetReviewPromptBtn" style="background: none; border: none; color: #005bff; font-size: 11px; cursor: pointer; font-weight: 600; padding: 0;">Сброс</button>
+            </div>
+            <div style="font-size: 11px; color: #666; margin-bottom: 6px;">Используется в таблице отзывов, когда выбран режим «✨ DeepSeek AI»:</div>
+            <textarea id="deepseekReviewPrompt" rows="6" placeholder="Промпт для ответов на отзывы..." style="width: 100%; box-sizing: border-box; font-size: 12px; line-height: 1.4; resize: vertical; border: 1px solid #ddd; border-radius: 6px; padding: 8px;"></textarea>
+            <div style="display: flex; gap: 4px; flex-wrap: wrap; margin-top: 6px; align-items: center;">
+                <span style="font-size: 10px; color: #888;">Вставить тег:</span>
+                <button type="button" class="prompt-chip" data-target="review" data-chip="{product}">{product}</button>
+                <button type="button" class="prompt-chip" data-target="review" data-chip="{review}">{review}</button>
+                <button type="button" class="prompt-chip" data-target="review" data-chip="{date}">{date}</button>
+            </div>
+        </div>
+
+        <!-- Citilink / Avito Prompt -->
+        <div class="settings-box ai-card">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                <label style="font-size: 12px; font-weight: 700; color: #222;">Промпт описания Citilink для Avito</label>
+                <button id="resetCitilinkPromptBtn" style="background: none; border: none; color: #005bff; font-size: 11px; cursor: pointer; font-weight: 600; padding: 0;">Сброс</button>
+            </div>
+            <div style="font-size: 11px; color: #666; margin-bottom: 6px;">Получает данные товара и формирует текст объявления без выдуманных характеристик:</div>
+            <textarea id="deepseekCitilinkPrompt" rows="8" placeholder="Промпт для описания товара Citilink..." style="width: 100%; box-sizing: border-box; font-size: 12px; line-height: 1.4; resize: vertical; border: 1px solid #ddd; border-radius: 6px; padding: 8px;"></textarea>
+            <div style="display: flex; gap: 4px; flex-wrap: wrap; margin-top: 6px; align-items: center;">
+                <span style="font-size: 10px; color: #888;">Вставить тег:</span>
+                <button type="button" class="prompt-chip" data-target="citilink" data-chip="{article}">{article}</button>
+                <button type="button" class="prompt-chip" data-target="citilink" data-chip="{name}">{name}</button>
+                <button type="button" class="prompt-chip" data-target="citilink" data-chip="{brand}">{brand}</button>
+                <button type="button" class="prompt-chip" data-target="citilink" data-chip="{description}">{description}</button>
+                <button type="button" class="prompt-chip" data-target="citilink" data-chip="{characteristics}">{characteristics}</button>
             </div>
         </div>
 

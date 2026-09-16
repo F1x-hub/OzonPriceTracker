@@ -36,6 +36,11 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         startWbBackgroundFetch(request.articles);
         sendResponse({status: "started"});
         return false; // Sync response, processing continues in background
+    } else if (request.action === 'fetchCitilinkProducts') {
+        // Start background processing
+        startCitilinkBackgroundFetch(request.articles);
+        sendResponse({status: "started"});
+        return false; // Sync response, processing continues in background
     } else if (request.action === 'deepseek_check_balance') {
         handleDeepSeekCheckBalance(request.apiKey)
             .then(res => sendResponse(res))
@@ -43,6 +48,11 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         return true; // Async response
     } else if (request.action === 'deepseek_generate_answer') {
         handleDeepSeekGenerateAnswer(request.data)
+            .then(res => sendResponse(res))
+            .catch(err => sendResponse({ success: false, error: err.message }));
+        return true; // Async response
+    } else if (request.action === 'deepseek_generate_review_answer') {
+        handleDeepSeekGenerateReviewAnswer(request.data)
             .then(res => sendResponse(res))
             .catch(err => sendResponse({ success: false, error: err.message }));
         return true; // Async response
@@ -249,6 +259,245 @@ async function fetchOneWb(articleId) {
   });
 }
 
+// --- Citilink product export logic ---
+
+const DEFAULT_CITILINK_SYSTEM_PROMPT = `Ты — редактор объявлений для Avito.
+Подготовь только готовое описание товара на русском языке на основе данных Citilink.
+Правила:
+1. Не выдумывай характеристики, комплектацию, цену, наличие и преимущества, которых нет в исходных данных.
+2. Сохрани важные технические характеристики, модель и бренд.
+3. Сделай текст понятным, аккуратным и подходящим для объявления Avito.
+4. Не добавляй заголовок, цену, ссылки, служебные комментарии и markdown-разметку.
+5. Верни только итоговый текст описания.`;
+
+function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function createBackgroundTab(url) {
+    return new Promise((resolve, reject) => {
+        chrome.tabs.create({ url, active: false }, (tab) => {
+            if (chrome.runtime.lastError || !tab?.id) {
+                reject(chrome.runtime.lastError || new Error('Не удалось открыть страницу Citilink'));
+                return;
+            }
+            resolve(tab);
+        });
+    });
+}
+
+function waitForTabComplete(tabId, timeoutMs = 25000) {
+    return new Promise(resolve => {
+        let finished = false;
+
+        const finish = (isComplete) => {
+            if (finished) return;
+            finished = true;
+            chrome.tabs.onUpdated.removeListener(onUpdated);
+            clearTimeout(timeoutId);
+            resolve(isComplete);
+        };
+
+        const onUpdated = (updatedTabId, changeInfo) => {
+            if (updatedTabId === tabId && changeInfo.status === 'complete') {
+                finish(true);
+            }
+        };
+
+        const timeoutId = setTimeout(() => finish(false), timeoutMs);
+        chrome.tabs.onUpdated.addListener(onUpdated);
+        chrome.tabs.get(tabId, tab => {
+            if (!chrome.runtime.lastError && tab?.status === 'complete') {
+                finish(true);
+            }
+        });
+    });
+}
+
+function sendTabMessage(tabId, message) {
+    return new Promise(resolve => {
+        chrome.tabs.sendMessage(tabId, message, response => {
+            void chrome.runtime.lastError;
+            resolve(response || null);
+        });
+    });
+}
+
+async function waitForCitilinkContent(tabId, message, isReady, timeoutMs = 25000, settleMs = 0) {
+    const startedAt = Date.now();
+    let bestResponse = null;
+    let firstReadyAt = 0;
+    let stableSince = 0;
+    let lastFingerprint = '';
+
+    while (Date.now() - startedAt < timeoutMs) {
+        const response = await sendTabMessage(tabId, message);
+        if (response && isReady(response)) {
+            if (!settleMs) return response;
+
+            const currentImageUrls = Array.isArray(response.imageUrls) ? response.imageUrls : [];
+            const bestImageCount = Array.isArray(bestResponse?.imageUrls) ? bestResponse.imageUrls.length : 0;
+            if (!bestResponse || currentImageUrls.length > bestImageCount) {
+                bestResponse = response;
+            }
+
+            const fingerprint = JSON.stringify({
+                article: response.article,
+                name: response.name,
+                brand: response.brand,
+                imageUrls: currentImageUrls
+            });
+            const now = Date.now();
+            if (!firstReadyAt) firstReadyAt = now;
+            if (fingerprint !== lastFingerprint) {
+                lastFingerprint = fingerprint;
+                stableSince = now;
+            }
+
+            // Let the gallery finish hydrating before accepting the product data.
+            if (now - firstReadyAt >= settleMs && now - stableSince >= 1000) {
+                return bestResponse;
+            }
+        }
+        await sleep(700);
+    }
+
+    return bestResponse;
+}
+
+async function closeBackgroundTab(tabId) {
+    try {
+        await new Promise(resolve => {
+            chrome.tabs.remove(tabId, () => {
+                void chrome.runtime.lastError;
+                resolve();
+            });
+        });
+    } catch (_) {
+        // The tab may already have been closed by the browser.
+    }
+}
+
+async function fetchCitilinkPage(url, action, articleId, isReady, settleProduct = false) {
+    const tab = await createBackgroundTab(url);
+
+    try {
+        await waitForTabComplete(tab.id);
+        return await waitForCitilinkContent(
+            tab.id,
+            { action, articleId },
+            isReady,
+            25000,
+            settleProduct ? 2800 : 0
+        );
+    } finally {
+        await closeBackgroundTab(tab.id);
+    }
+}
+
+async function fetchOneCitilink(articleId) {
+    const normalizedArticle = String(articleId || '').trim();
+    const searchUrl = `https://www.citilink.ru/search/?text=${encodeURIComponent(normalizedArticle)}`;
+    const searchResult = await fetchCitilinkPage(
+        searchUrl,
+        'getCitilinkSearchResult',
+        normalizedArticle,
+        response => response.found && response.url
+    );
+
+    if (!searchResult) {
+        throw new Error('Товар не найден в поиске Citilink или страница не загрузилась');
+    }
+
+    const product = await fetchCitilinkPage(
+        searchResult.url,
+        'getCitilinkProductData',
+        normalizedArticle,
+        response => response.found && (response.name || response.characteristicsText),
+        true
+    );
+
+    if (!product) {
+        throw new Error('Не удалось получить данные карточки товара Citilink');
+    }
+
+    const aiResult = await handleDeepSeekGenerateDescription(product);
+    if (!aiResult.success) {
+        throw new Error(aiResult.error || 'DeepSeek не вернул описание');
+    }
+
+    const { characteristics, characteristicsText, ...productForStorage } = product;
+    const imageCount = Array.isArray(productForStorage.imageUrls)
+        ? productForStorage.imageUrls.length
+        : 0;
+    return {
+        ...productForStorage,
+        article: normalizedArticle,
+        imageCount,
+        description: aiResult.description,
+        status: 'done',
+        error: ''
+    };
+}
+
+async function startCitilinkBackgroundFetch(articles) {
+    const normalizedArticles = Array.from(new Set((articles || []).map(article => String(article).trim()).filter(Boolean)));
+    const total = normalizedArticles.length;
+    const results = {};
+
+    if (total === 0) return;
+
+    await chrome.storage.local.set({
+        citilinkStatus: { total, done: 0, running: true, phase: 'starting', error: '' },
+        citilinkLastResults: {}
+    });
+
+    if (!(await getDeepSeekApiKey())) {
+        const error = 'DeepSeek API-ключ не настроен. Откройте вкладку AI и сохраните ключ.';
+        normalizedArticles.forEach(article => {
+            results[article] = { article, status: 'error', error };
+        });
+        await chrome.storage.local.set({
+            citilinkStatus: { total, done: total, running: false, phase: 'error', error },
+            citilinkLastResults: results
+        });
+        return;
+    }
+
+    let done = 0;
+    for (const article of normalizedArticles) {
+        results[article] = { article, status: 'searching', error: '' };
+        await chrome.storage.local.set({
+            citilinkStatus: { total, done, running: true, phase: 'searching', error: '' },
+            citilinkLastResults: results
+        });
+
+        try {
+            results[article] = await fetchOneCitilink(article);
+        } catch (error) {
+            results[article] = {
+                article,
+                status: 'error',
+                error: error?.message || 'Неизвестная ошибка обработки'
+            };
+        }
+
+        done += 1;
+        await chrome.storage.local.set({
+            citilinkStatus: { total, done, running: done < total, phase: done < total ? 'processing' : 'done', error: '' },
+            citilinkLastResults: results
+        });
+    }
+
+    chrome.notifications.create(`citilink-done-${Date.now()}`, {
+        type: 'basic',
+        title: 'Citilink: обработка завершена',
+        message: `Готово! Обработано товаров: ${total}.`,
+        iconUrl: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=',
+        requireInteraction: true
+    });
+}
+
 // =========================================================================
 // DEEPSEEK API INTEGRATION
 // =========================================================================
@@ -260,6 +509,14 @@ const DEFAULT_DEEPSEEK_SYSTEM_PROMPT = `Ты — вежливый и компе�
 3. Если вопрос о совместимости (например, подойдет ли пульт к определенной модели техники): поясни, что если модель указана в описании или совпадает с оригинальным пультом, то устройство гарантированно подойдет. Если модель старая или редкая, посоветуй сверить расположение и назначение основных кнопок со старым пультом или задать уточняющий вопрос.
 4. Ответ должен быть лаконичным, уверенным и доброжелательным (2-5 предложений).
 5. Завершай ответ пожеланием приятных покупок или отличного настроения.`;
+
+const DEFAULT_DEEPSEEK_REVIEW_PROMPT = `Ты — вежливый и внимательный представитель магазина на Ozon. Твоя задача — ответить на отзыв покупателя о товаре.
+Правила:
+1. Поблагодари покупателя за отзыв и обратись к сути его впечатления.
+2. Отвечай доброжелательно и профессионально, не спорь с покупателем и не выдумывай факты.
+3. Если отзыв негативный, признай неудобство и предложи обратиться в поддержку магазина для решения вопроса.
+4. Ответ должен быть лаконичным — 2-4 предложения, без markdown-разметки и служебных комментариев.
+5. Заверши ответ пожеланием приятных покупок.`;
 
 async function getDeepSeekApiKey(explicitKey) {
     if (explicitKey && explicitKey.trim()) {
@@ -337,52 +594,11 @@ async function handleDeepSeekCheckBalance(explicitKey) {
     }
 }
 
-async function handleDeepSeekGenerateAnswer(inputData) {
+async function requestDeepSeekCompletion({ systemPrompt, userMessageContent, model, temperature }) {
     const apiKey = await getDeepSeekApiKey();
     if (!apiKey) {
         return { success: false, error: 'DeepSeek API-ключ не настроен. Укажите его в расширении.' };
     }
-
-    const settings = await chrome.storage.local.get({
-        deepseekPrompt: DEFAULT_DEEPSEEK_SYSTEM_PROMPT,
-        deepseekModel: 'deepseek-chat',
-        deepseekTemperature: 0.5,
-        deepseekStats: {
-            totalRequests: 0,
-            totalPromptTokens: 0,
-            totalCompletionTokens: 0,
-            totalTokens: 0,
-            estimatedCostCNY: 0
-        }
-    });
-
-    const rawSystemPrompt = settings.deepseekPrompt || DEFAULT_DEEPSEEK_SYSTEM_PROMPT;
-    const model = settings.deepseekModel || 'deepseek-chat';
-    const temperature = Number(settings.deepseekTemperature) || 0.5;
-
-    const { product, brand, sku, question, buyer, article } = inputData || {};
-
-    if (!question || !question.trim()) {
-        return { success: false, error: 'Текст вопроса пуст' };
-    }
-
-    // Substitute user chips in system prompt if present
-    const systemPrompt = rawSystemPrompt
-        .replaceAll('{product}', product || 'товар')
-        .replaceAll('{brand}', brand || 'бренд')
-        .replaceAll('{sku}', sku || article || '')
-        .replaceAll('{buyer}', buyer || 'покупатель')
-        .replaceAll('{question}', question || '')
-        .replaceAll('{article}', article || sku || '');
-
-    const userMessageContent = `Информация о товаре и вопрос покупателя:
-- Товар: ${product || 'Не указан'}
-- Бренд: ${brand || 'Не указан'}
-- Артикул / SKU: ${sku || article || 'Не указан'}
-- Покупатель: ${buyer || 'Покупатель'}
-- Вопрос: ${question.trim()}
-
-Сформируй качественный и вежливый ответ покупателю. Ответ пиши обычным чистым текстом, без звездочек, без markdown-разметки и без списков.`;
 
     try {
         const response = await fetch('https://api.deepseek.com/chat/completions', {
@@ -393,12 +609,12 @@ async function handleDeepSeekGenerateAnswer(inputData) {
                 'Authorization': `Bearer ${apiKey}`
             },
             body: JSON.stringify({
-                model: model,
+                model: model || 'deepseek-chat',
                 messages: [
                     { role: 'system', content: systemPrompt },
                     { role: 'user', content: userMessageContent }
                 ],
-                temperature: temperature,
+                temperature: Number(temperature) || 0.5,
                 max_tokens: 1024
             }),
             signal: AbortSignal.timeout(25000)
@@ -417,26 +633,23 @@ async function handleDeepSeekGenerateAnswer(inputData) {
         }
 
         const data = await response.json();
-        const rawAnswer = data.choices?.[0]?.message?.content?.trim() || '';
-        const answer = cleanAiMarkdownText(rawAnswer);
+        const rawText = data.choices?.[0]?.message?.content?.trim() || '';
+        const text = cleanAiMarkdownText(rawText);
         const usage = data.usage || { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
-
-        // Update statistics
-        const stats = settings.deepseekStats || {
-            totalRequests: 0,
-            totalPromptTokens: 0,
-            totalCompletionTokens: 0,
-            totalTokens: 0,
-            estimatedCostCNY: 0
-        };
+        const statsData = await chrome.storage.local.get({
+            deepseekStats: {
+                totalRequests: 0,
+                totalPromptTokens: 0,
+                totalCompletionTokens: 0,
+                totalTokens: 0,
+                estimatedCostCNY: 0
+            }
+        });
+        const stats = statsData.deepseekStats || {};
 
         const promptTokens = usage.prompt_tokens || 0;
         const completionTokens = usage.completion_tokens || 0;
         const totalTokens = usage.total_tokens || (promptTokens + completionTokens);
-
-        // DeepSeek Pricing:
-        // deepseek-chat (V3): ~2 CNY / 1M in, ~8 CNY / 1M out
-        // deepseek-reasoner (R1): ~4 CNY / 1M in, ~16 CNY / 1M out
         const isReasoner = model === 'deepseek-reasoner';
         const inputRate = isReasoner ? 0.000004 : 0.000002;
         const outputRate = isReasoner ? 0.000016 : 0.000008;
@@ -450,24 +663,148 @@ async function handleDeepSeekGenerateAnswer(inputData) {
         stats.lastUsedAt = Date.now();
 
         await chrome.storage.local.set({ deepseekStats: stats });
-
-        // Asynchronously check balance to keep dashboard fresh
         handleDeepSeekCheckBalance(apiKey).catch(() => {});
 
-        return {
-            success: true,
-            answer: answer,
-            usage: usage,
-            stats: stats
-        };
+        return { success: true, text, usage, stats };
     } catch (err) {
         console.error('DeepSeek generation error:', err);
         const isTimeout = err.name === 'TimeoutError';
-        return { 
-            success: false, 
+        return {
+            success: false,
             error: isTimeout ? 'Превышено время ожидания ответа DeepSeek (таймаут 25с)' : (err.message || 'Ошибка связи с DeepSeek API')
         };
     }
+}
+
+async function handleDeepSeekGenerateAnswer(inputData) {
+    const settings = await chrome.storage.local.get({
+        deepseekPrompt: DEFAULT_DEEPSEEK_SYSTEM_PROMPT,
+        deepseekModel: 'deepseek-chat',
+        deepseekTemperature: 0.5
+    });
+    const rawSystemPrompt = settings.deepseekPrompt || DEFAULT_DEEPSEEK_SYSTEM_PROMPT;
+    const model = settings.deepseekModel || 'deepseek-chat';
+    const temperature = Number(settings.deepseekTemperature) || 0.5;
+    const { product, brand, sku, question, buyer, article } = inputData || {};
+
+    if (!question || !question.trim()) {
+        return { success: false, error: 'Текст вопроса пуст' };
+    }
+
+    const systemPrompt = rawSystemPrompt
+        .replaceAll('{product}', product || 'товар')
+        .replaceAll('{brand}', brand || 'бренд')
+        .replaceAll('{sku}', sku || article || '')
+        .replaceAll('{buyer}', buyer || 'покупатель')
+        .replaceAll('{question}', question || '')
+        .replaceAll('{article}', article || sku || '');
+
+    const userMessageContent = `Информация о товаре и вопрос покупателя:
+- Товар: ${product || 'Не указан'}
+- Бренд: ${brand || 'Не указан'}
+- Артикул / SKU: ${sku || article || 'Не указан'}
+- Покупатель: ${buyer || 'Покупатель'}
+- Вопрос: ${question.trim()}
+
+Сформируй качественный и вежливый ответ покупателю. Ответ пиши обычным чистым текстом, без звездочек, без markdown-разметки и без списков.`;
+
+    const result = await requestDeepSeekCompletion({
+        systemPrompt,
+        userMessageContent,
+        model,
+        temperature
+    });
+
+    return result.success ? { ...result, answer: result.text } : result;
+}
+
+async function handleDeepSeekGenerateReviewAnswer(inputData) {
+    const settings = await chrome.storage.local.get({
+        deepseekReviewPrompt: DEFAULT_DEEPSEEK_REVIEW_PROMPT,
+        deepseekModel: 'deepseek-chat',
+        deepseekTemperature: 0.5
+    });
+    const rawSystemPrompt = (settings.deepseekReviewPrompt || '').trim() || DEFAULT_DEEPSEEK_REVIEW_PROMPT;
+    const model = settings.deepseekModel || 'deepseek-chat';
+    const temperature = Number(settings.deepseekTemperature) || 0.5;
+    const { product, brand, review, date, buyer } = inputData || {};
+
+    if (!review || !review.trim()) {
+        return { success: false, error: 'Текст отзыва пуст' };
+    }
+
+    const systemPrompt = rawSystemPrompt
+        .replaceAll('{product}', product || 'товар')
+        .replaceAll('{brand}', brand || 'бренд')
+        .replaceAll('{review}', review || '')
+        .replaceAll('{date}', date || '');
+
+    const userMessageContent = `Информация об отзыве покупателя:
+- Товар: ${product || 'Не указан'}
+- Бренд: ${brand || 'Не указан'}
+- Покупатель: ${buyer || 'Покупатель'}
+- Дата публикации: ${date || 'Не указана'}
+- Отзыв: ${review.trim()}
+
+Сформируй качественный и вежливый ответ покупателю. Ответ пиши обычным чистым текстом, без звездочек, без markdown-разметки и без списков.`;
+
+    const result = await requestDeepSeekCompletion({
+        systemPrompt,
+        userMessageContent,
+        model,
+        temperature
+    });
+
+    return result.success ? { ...result, answer: result.text } : result;
+}
+
+async function handleDeepSeekGenerateDescription(inputData) {
+    const settings = await chrome.storage.local.get({
+        deepseekCitilinkPrompt: DEFAULT_CITILINK_SYSTEM_PROMPT,
+        deepseekModel: 'deepseek-chat',
+        deepseekTemperature: 0.5
+    });
+    const rawSystemPrompt = settings.deepseekCitilinkPrompt || DEFAULT_CITILINK_SYSTEM_PROMPT;
+    const model = settings.deepseekModel || 'deepseek-chat';
+    const temperature = Number(settings.deepseekTemperature) || 0.5;
+    const {
+        article,
+        name,
+        brand,
+        description: sourceDescription,
+        characteristicsText
+    } = inputData || {};
+
+    if (!name && !characteristicsText) {
+        return { success: false, error: 'Нет исходных данных товара для DeepSeek' };
+    }
+
+    const systemPrompt = rawSystemPrompt
+        .replaceAll('{article}', article || '')
+        .replaceAll('{name}', name || 'товар')
+        .replaceAll('{brand}', brand || 'бренд')
+        .replaceAll('{description}', sourceDescription || '')
+        .replaceAll('{characteristics}', characteristicsText || '');
+
+    const userMessageContent = `Исходные данные товара Citilink:
+- Артикул: ${article || 'Не указан'}
+- Название: ${name || 'Не указано'}
+- Бренд: ${brand || 'Не указан'}
+- Описание Citilink: ${sourceDescription || 'Не указано'}
+
+Характеристики:
+${characteristicsText || 'Не указаны'}
+
+Сформируй итоговое описание для объявления Avito строго по этим данным.`;
+
+    const result = await requestDeepSeekCompletion({
+        systemPrompt,
+        userMessageContent,
+        model,
+        temperature
+    });
+
+    return result.success ? { ...result, description: result.text } : result;
 }
 
 async function handleDeepSeekResetStats() {

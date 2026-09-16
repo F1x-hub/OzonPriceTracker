@@ -18,6 +18,16 @@
     gap: 12px;
 }
 
+.opt-ext-panel-header.opt-ext-draggable-handle {
+    cursor: grab;
+    touch-action: none;
+    user-select: none;
+}
+
+.opt-ext-panel-header.opt-ext-draggable-handle.is-dragging {
+    cursor: grabbing;
+}
+
 .opt-ext-panel-title {
     color: #172033;
     font-size: 14px;
@@ -391,4 +401,3 @@
     gap: 10px !important;
     font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif !important;
 }
-
