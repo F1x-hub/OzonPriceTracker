@@ -108,6 +108,21 @@
         return Array.from(bestByImage.values());
     }
 
+    function collectEmbeddedImageUrls(allowedKeys = null) {
+        const bestByImage = new Map();
+        const imageUrlPattern = /https?:[^"'\\\s]+\/product-images\/[^"'\\\s]+/g;
+
+        document.querySelectorAll('script').forEach(script => {
+            const matches = script.textContent?.match(imageUrlPattern) || [];
+            matches.forEach(url => {
+                if (allowedKeys && !allowedKeys.has(imageKey(url))) return;
+                addImageCandidate(bestByImage, url);
+            });
+        });
+
+        return Array.from(bestByImage.values());
+    }
+
     function getImageUrl(element) {
         return toAbsoluteUrl(element?.currentSrc || element?.src || element?.getAttribute('src'));
     }
@@ -153,11 +168,19 @@
         const mainImageSelector = mainGallery.querySelector(SLIDE_IMAGE_SELECTOR)
             ? SLIDE_IMAGE_SELECTOR
             : 'img, source';
+        const galleryImageKeys = new Set(
+            Array.from(mainGallery.querySelectorAll('img, source'))
+                .map(getImageUrl)
+                .filter(Boolean)
+                .map(imageKey)
+        );
         const addScopeImages = () => {
             collectImageUrlsFromScope(mainGallery, mainImageSelector)
                 .forEach(url => addImageCandidate(bestByImage, url));
         };
 
+        collectEmbeddedImageUrls(galleryImageKeys)
+            .forEach(url => addImageCandidate(bestByImage, url));
         addScopeImages();
 
         const thumbsGallery = document.querySelector(THUMBS_GALLERY_SELECTOR);
