@@ -6,7 +6,7 @@
 
   <p>
     <img src="https://img.shields.io/badge/MANIFEST-V3-168bd3?logo=googlechrome&logoColor=white&labelColor=434950" alt="Manifest V3">
-    <a href="https://github.com/F1x-hub/MarketPilot/releases/tag/v1.0.8"><img src="https://img.shields.io/badge/VERSION-1.0.8-65b32e?labelColor=434950" alt="Latest release v1.0.8"></a>
+    <a href="https://github.com/F1x-hub/MarketPilot/releases/tag/v1.0.9"><img src="https://img.shields.io/badge/VERSION-1.0.9-65b32e?labelColor=434950" alt="Latest release v1.0.9"></a>
     <img src="https://img.shields.io/badge/JAVASCRIPT-ES6%2B-f0db4f?logo=javascript&logoColor=111827&labelColor=434950" alt="JavaScript ES6 plus">
     <img src="https://img.shields.io/badge/VANILLA-ES6%2B-f0db4f?labelColor=434950" alt="Vanilla JavaScript ES6 plus">
     <img src="https://img.shields.io/badge/MAINTAINER-F1x--hub-f97316?labelColor=434950" alt="Maintainer F1x-hub">
@@ -146,7 +146,7 @@ API-ключ DeepSeek не должен попадать в Git, screenshots и�
 
 ## Релиз и документация
 
-Целевой релиз — [**v1.0.8**](https://github.com/F1x-hub/MarketPilot/releases/tag/v1.0.8). Версия расширения в `MarketPilot/manifest.json` и `MarketPilot/package.json` синхронизирована с этим релизом.
+Целевой релиз — [**v1.0.9**](https://github.com/F1x-hub/MarketPilot/releases/tag/v1.0.9). Версия расширения в `MarketPilot/manifest.json` и `MarketPilot/package.json` синхронизирована с этим релизом.
 
 Дополнительные инструкции по разработке находятся в [`MarketPilot/docs/DEVELOPMENT.md`](MarketPilot/docs/DEVELOPMENT.md), а результаты аудитов и рабочие планы — в [`MarketPilot/docs/`](MarketPilot/docs/).
 
