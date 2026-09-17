@@ -1,0 +1,30 @@
+const { chromium } = require('C:/Users/irakl/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright');
+const fs = require('fs'); const path = require('path'); const http = require('http');
+const root = path.resolve('MarketPilot'); const out = path.join(root,'docs/audits/2026-09-17');
+(async()=>{
+const server=http.createServer((req,res)=>{ const f=path.join(root,decodeURIComponent(req.url.split('?')[0])); try {const type=f.endsWith('.js')?'text/javascript':f.endsWith('.css')?'text/css':f.endsWith('.svg')?'image/svg+xml':f.endsWith('.png')?'image/png':'text/html';res.setHeader('Content-Type',type);res.end(fs.readFileSync(f));}catch{res.statusCode=404;res.end();}});
+await new Promise(r=>server.listen(0,'127.0.0.1',r)); const base='http://127.0.0.1:'+server.address().port;
+const browser=await chromium.launch({headless:true}); const page=await browser.newPage();
+await page.addInitScript(()=>{
+window.chrome={storage:{local:{get:async defaults=>({...defaults,trackedItems:[{id:'audit',title:'Тестовый товар без цены',url:'https://www.ozon.ru/product/test-123/',targetPrice:2000,lastPrice:null,addedAt:'2026-09-17T00:00:00Z'}],deepseekStats:{totalRequests:7,totalPromptTokens:1200,totalCompletionTokens:800,totalTokens:2000,estimatedCostCNY:0.123456,lastUsedAt:'2026-09-17T08:30:00Z'},deepseekLastBalance:{is_available:true,balance_infos:[{currency:'USD',total_balance:'12.34'}]},deepseekBalanceLastChecked:'2026-09-17T08:35:00Z'})},onChanged:{addListener(){}}},runtime:{sendMessage:(msg,cb)=>{if(msg.action==='deepseek_check_balance')cb({success:true,balanceInfo:{is_available:true,balance_infos:[{currency:'USD',total_balance:'12.34'}]}});else if(msg.action==='deepseek_reset_stats')cb({success:true,stats:{totalRequests:0,totalPromptTokens:0,totalCompletionTokens:0,totalTokens:0,estimatedCostCNY:0}});else cb({status:'error',error:'AUDIT simulated failure'})}},tabs:{query:async()=>[{id:1,url:'https://example.org',title:'Другая страница'}]}};
+});
+let results=[]; page.on('pageerror',e=>results.push({error:e.message}));
+for(const w of [1440,1024,768,390]){
+await page.setViewportSize({width:w,height:900});await page.goto(base+'/dashboard.html?audit='+w);await page.waitForTimeout(100);await page.screenshot({path:path.join(out,'dashboard-'+w+'.png'),fullPage:true});
+results.push({width:w,...await page.evaluate(()=>({scrollWidth:document.body.scrollWidth,documentScrollWidth:document.documentElement.scrollWidth,viewport:innerWidth,price:document.querySelector('.price-cell strong')?.textContent,trackWidth:document.querySelector('.track-controls').scrollWidth,trackClient:document.querySelector('.track-controls').clientWidth,sidebar:document.querySelector('.sidebar')?.getBoundingClientRect().width,main:document.querySelector('.main-content')?.getBoundingClientRect().width,overflow:innerWidth<500?[...document.querySelectorAll('body *')].map((element)=>({tag:element.tagName,id:element.id,className:typeof element.className==='string'?element.className:'',right:element.getBoundingClientRect().right,width:element.getBoundingClientRect().width,display:getComputedStyle(element).display})).filter((item)=>item.right>innerWidth&&item.display!=='none').sort((a,b)=>b.right-a.right).slice(0,5):[]}))});
+}
+await page.setViewportSize({width:1440,height:900}); await page.goto(base+'/dashboard.html?audit=settings#/settings');
+results.push({customHidden:await page.locator('#customModelRow').getAttribute('hidden'),customVisible:await page.locator('#customModelRow').isVisible(),deepseekModelOptions:await page.locator('#deepseekModel option').allTextContents(),deepseekThinking:await page.locator('#deepseekThinking').inputValue(),deepseekBalance:await page.locator('#deepseekBalanceValue').textContent(),deepseekRequests:await page.locator('#deepseekStatRequests').textContent(),deepseekTokens:await page.locator('#deepseekStatTokens').textContent(),deepseekCost:await page.locator('#deepseekStatCost').textContent()});
+await page.locator('#checkDeepseekBalance').click(); await page.waitForTimeout(50);
+results.push({balanceCheckNote:await page.locator('#deepseekBalanceNote').textContent(),balanceAfterCheck:await page.locator('#deepseekBalanceValue').textContent()});
+await page.screenshot({path:path.join(out,'settings.png'),fullPage:true});
+await page.setViewportSize({width:390,height:900}); await page.goto(base+'/dashboard.html?audit=settings-mobile#/settings');
+results.push({settingsMobileScrollWidth:await page.evaluate(()=>document.documentElement.scrollWidth),settingsMobileBalance:await page.locator('#deepseekBalanceValue').textContent(),settingsMobileButtonWidth:await page.locator('#checkDeepseekBalance').evaluate((el)=>el.getBoundingClientRect().width)});
+await page.screenshot({path:path.join(out,'settings-mobile.png'),fullPage:true});
+await page.goto(base+'/dashboard.html?audit=collection#/stores?marketplace=wildberries&module=collection');await page.locator('#wbCollectionInput').fill('12345');await page.locator('#startWbCollection').click();
+await page.screenshot({path:path.join(out,'collection.png'),fullPage:true});
+results.push({collectionVisible:await page.locator('[data-store-panel="wildberries"]').isVisible(),wbInputVisible:await page.locator('#wbCollectionInput').isVisible(),citilinkInputVisible:await page.locator('#citilinkCollectionInput').isVisible(),errorResponseUi:await page.locator('#wbCollectionNote').textContent(),inputAfterError:await page.locator('#wbCollectionInput').inputValue()});
+await page.setViewportSize({width:368,height:650});await page.goto(base+'/popup_compact.html?audit=popup'); await page.screenshot({path:path.join(out,'popup.png'),fullPage:true});
+results.push({popupHeight:await page.evaluate(()=>document.documentElement.scrollHeight),quickVisible:await page.locator('#quickForm').isVisible(),manualVisible:await page.locator('#manualForm').isVisible()});
+fs.writeFileSync(path.join(out,'observations.json'),JSON.stringify(results,null,2));console.log(JSON.stringify(results,null,2));await browser.close();server.close();
+})().catch(e=>{console.error(e);process.exit(1)});

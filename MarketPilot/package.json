@@ -1,0 +1,11 @@
+{
+  "name": "marketpilot-extension",
+  "version": "1.0.8",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "node scripts/check.mjs",
+    "test": "node scripts/check.mjs && node scripts/smoke-background.mjs",
+    "build": "node scripts/build.mjs"
+  }
+}

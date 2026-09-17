@@ -1,0 +1,101 @@
+{
+  "manifest_version": 3,
+  "name": "MarketPilot",
+  "version": "1.0.8",
+  "description": "MarketPilot: мониторинг Ozon, сбор цен Wildberries и карточек Citilink",
+  "icons": {
+    "16": "assets/marketpilot-mark-16.png",
+    "32": "assets/marketpilot-mark-32.png",
+    "48": "assets/marketpilot-mark-48.png",
+    "128": "assets/marketpilot-mark-128.png"
+  },
+  "permissions": [
+    "storage",
+    "alarms",
+    "notifications",
+    "tabs",
+    "scripting"
+  ],
+  "host_permissions": [
+    "https://www.ozon.ru/*",
+    "https://ozon.ru/*",
+    "https://www.ozon.com/*",
+    "https://ozon.com/*",
+    "https://www.wildberries.ru/*",
+    "https://www.citilink.ru/*",
+    "https://seller.ozon.ru/*",
+    "https://api.deepseek.com/*",
+    "https://platform.deepseek.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup_compact.html",
+    "default_icon": {
+      "16": "assets/marketpilot-mark-16.png",
+      "32": "assets/marketpilot-mark-32.png",
+      "48": "assets/marketpilot-mark-48.png"
+    }
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.wildberries.ru/catalog/*/detail.aspx"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://www.ozon.ru/product/*",
+        "https://ozon.ru/product/*",
+        "https://www.ozon.com/product/*",
+        "https://ozon.com/product/*"
+      ],
+      "js": [
+        "ozon_content.js"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://seller.ozon.ru/app/reviews*",
+        "https://seller.ozon.ru/app/products/edit/*"
+      ],
+      "js": [
+        "seller_dom.js",
+        "seller_lifecycle.js",
+        "seller_content.js"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://www.citilink.ru/*"
+      ],
+      "js": [
+        "citilink_content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "assets/marketpilot-mark.svg",
+        "ozon_widget.css",
+        "seller_widget.css"
+      ],
+      "matches": [
+        "https://www.ozon.ru/*",
+        "https://ozon.ru/*",
+        "https://www.ozon.com/*",
+        "https://ozon.com/*",
+        "https://seller.ozon.ru/*"
+      ]
+    }
+  ]
+}

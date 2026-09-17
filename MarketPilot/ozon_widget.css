@@ -1,0 +1,206 @@
+:host {
+    all: initial;
+    color: #1f1f1f;
+    font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+.tracker-widget {
+    box-sizing: border-box;
+    width: min(100%, 420px);
+    margin: 16px 0;
+    padding: 16px;
+    border: 1px solid #e3e7ef;
+    border-radius: 14px;
+    background: #ffffff;
+    box-shadow: 0 4px 18px rgba(17, 24, 39, 0.06);
+}
+
+.tracker-eyebrow {
+    margin: 0;
+    color: #6b7280;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+
+.tracker-brand {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 8px;
+}
+
+.tracker-logo {
+    width: 20px;
+    height: 20px;
+    border-radius: 6px;
+}
+
+.tracker-heading {
+    color: #111827;
+    font-size: 18px;
+    font-weight: 700;
+    line-height: 1.25;
+}
+
+.tracker-product {
+    overflow: hidden;
+    margin-top: 5px;
+    color: #6b7280;
+    font-size: 13px;
+    line-height: 1.35;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.tracker-price-row {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    margin: 16px 0;
+}
+
+.tracker-label,
+.tracker-field > span:first-child,
+.tracker-options legend {
+    color: #6b7280;
+    font-size: 12px;
+}
+
+.tracker-price {
+    color: #111827;
+    font-size: 22px;
+    line-height: 1;
+}
+
+.tracker-field {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 12px;
+}
+
+.tracker-input-wrap {
+    display: flex;
+    align-items: center;
+    width: 150px;
+    border: 1px solid #d7dce5;
+    border-radius: 9px;
+    background: #fff;
+    transition: border-color 160ms ease-out, box-shadow 160ms ease-out;
+}
+
+.tracker-input-wrap:focus-within {
+    border-color: #005bff;
+    box-shadow: 0 0 0 3px rgba(0, 91, 255, 0.12);
+}
+
+.tracker-input-wrap input {
+    min-width: 0;
+    flex: 1;
+    box-sizing: border-box;
+    border: 0;
+    outline: 0;
+    padding: 9px 4px 9px 10px;
+    color: #111827;
+    font: inherit;
+    font-size: 14px;
+    text-align: right;
+}
+
+.tracker-input-wrap span {
+    padding-right: 10px;
+    color: #6b7280;
+    font-size: 13px;
+}
+
+.tracker-options {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 12px;
+    margin: 0 0 14px;
+    padding: 0;
+    border: 0;
+}
+
+.tracker-options legend {
+    width: 100%;
+    margin-bottom: 2px;
+}
+
+.tracker-options label {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    color: #374151;
+    cursor: pointer;
+    font-size: 12px;
+}
+
+.tracker-options input {
+    accent-color: #005bff;
+}
+
+.tracker-action {
+    width: 100%;
+    border: 0;
+    border-radius: 9px;
+    background: #005bff;
+    color: #ffffff;
+    cursor: pointer;
+    font: inherit;
+    font-size: 14px;
+    font-weight: 700;
+    padding: 11px 14px;
+    transition: background-color 160ms ease-out, transform 120ms ease-out;
+}
+
+.tracker-action:hover {
+    background: #0047cc;
+}
+
+.tracker-action:active {
+    transform: scale(0.98);
+}
+
+.tracker-action:focus-visible {
+    outline: 3px solid rgba(0, 91, 255, 0.28);
+    outline-offset: 2px;
+}
+
+.tracker-status {
+    min-height: 16px;
+    margin: 9px 0 0;
+    color: #6b7280;
+    font-size: 12px;
+    line-height: 1.35;
+}
+
+.tracker-status.is-success {
+    color: #15803d;
+}
+
+.tracker-status.is-error {
+    color: #b91c1c;
+}
+
+.tracker-status.is-neutral {
+    color: #1d4ed8;
+}
+
+@media (max-width: 520px) {
+    .tracker-widget {
+        width: 100%;
+        margin: 12px 0;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .tracker-input-wrap,
+    .tracker-action {
+        transition: none;
+    }
+}

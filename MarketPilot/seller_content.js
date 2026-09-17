@@ -1,0 +1,2941 @@
+// Ozon Seller Content Script (Reviews Auto-Reply & Bulk Rich-Content Filler)
+
+(function() {
+    if (window.__optExtSellerScriptLoaded) {
+        console.log('[opt-ext] Скрипт Ozon Seller уже загружен, пропускаю повторную инициализацию.');
+        return;
+    }
+    window.__optExtSellerScriptLoaded = true;
+
+    const sellerDom = globalThis.MarketPilotSellerDom;
+    if (!sellerDom) {
+        console.error('[opt-ext] Seller DOM helper не загружен. Инициализация остановлена.');
+        return;
+    }
+    const sellerLifecycle = globalThis.MarketPilotSellerLifecycle;
+    if (!sellerLifecycle) {
+        console.error('[opt-ext] Seller lifecycle helper не загружен. Инициализация остановлена.');
+        return;
+    }
+    const {
+        sleep,
+        makeFloatingPanelDraggable,
+        cleanRichContentText,
+        setNativeValue,
+        realDblClick
+    } = sellerDom;
+    const MARKETPILOT_MARK_URL = chrome.runtime.getURL('assets/marketpilot-mark.svg');
+
+    function logActivity(entry) {
+        chrome.runtime.sendMessage({ action: 'history_append', entry }, () => {
+            void chrome.runtime.lastError;
+        });
+    }
+
+    function createBrandMark(className = '') {
+        const mark = document.createElement('img');
+        mark.className = `opt-ext-brand-mark ${className}`.trim();
+        mark.src = MARKETPILOT_MARK_URL;
+        mark.alt = '';
+        mark.setAttribute('aria-hidden', 'true');
+        return mark;
+    }
+
+    // =========================================================================
+    // MODULE 1: Reviews Auto-Reply (seller.ozon.ru/app/reviews*)
+    // =========================================================================
+
+    const DEFAULT_REPLY_TEMPLATE = Object.freeze({
+        id: '__default_all_selected_reviews__',
+        title: 'Ответить на все выбранные отзывы',
+        text: 'Благодарим за обратную связь!'
+    });
+    const DEEPSEEK_AI_TEMPLATE_ID = 'deepseek_ai';
+
+    let rowStates = new Map();
+    let overlayElements = new Map();
+    let savedTemplates = [DEFAULT_REPLY_TEMPLATE];
+    let replySettings = { delayEnabled: false, minDelay: 2, maxDelay: 5 };
+    let isRunning = false;
+    let failedReplies = [];
+
+    let observer = null;
+    let overlayContainer = null;
+    let checkAllWrapper = null;
+    let bulkSelectWrapper = null;
+    let isRepositioning = false;
+
+    let floatBtnContainer = null;
+    let floatBtn = null;
+    let selectionSummary = null;
+
+    function normalizeReplyTemplates(templates) {
+        return Array.isArray(templates) && templates.length > 0
+            ? templates
+            : [DEFAULT_REPLY_TEMPLATE];
+    }
+
+    function refreshReplyTemplatesFromStorage() {
+        chrome.storage.local.get(['ozonReplyTemplates'], (result) => {
+            savedTemplates = normalizeReplyTemplates(result.ozonReplyTemplates);
+            updateAllDropdowns();
+            if (typeof updateQuestionsSelectDropdowns === 'function') {
+                updateQuestionsSelectDropdowns();
+            }
+            requestReposition();
+        });
+    }
+
+    function initReviewsAutoReply() {
+        if (document.getElementById('opt-ext-float-container')) return;
+
+        chrome.storage.local.get(['ozonReplyTemplates', 'ozonReplySettings'], (result) => {
+            savedTemplates = normalizeReplyTemplates(result.ozonReplyTemplates);
+            if (result.ozonReplySettings) {
+                replySettings = result.ozonReplySettings;
+            }
+            initReviewsUI();
+        });
+    }
+
+    chrome.storage.onChanged.addListener((changes, namespace) => {
+        if (namespace === 'local') {
+            if (changes.ozonReplyTemplates) {
+                refreshReplyTemplatesFromStorage();
+            }
+            if (changes.ozonReplySettings) {
+                replySettings = changes.ozonReplySettings.newValue || { delayEnabled: false, minDelay: 2, maxDelay: 5 };
+            }
+        }
+    });
+
+    chrome.runtime.onMessage.addListener((message) => {
+        if (message && message.action === 'refreshReplyTemplates') {
+            refreshReplyTemplatesFromStorage();
+        }
+    });
+
+    function injectSellerStyles() {
+        if (document.getElementById('opt-ext-seller-styles')) return;
+
+        const styleLink = document.createElement('link');
+        styleLink.id = 'opt-ext-seller-styles';
+        styleLink.rel = 'stylesheet';
+        styleLink.href = chrome.runtime.getURL('seller_widget.css');
+        (document.head || document.documentElement).appendChild(styleLink);
+    }
+
+    function initReviewsUI() {
+        if (document.getElementById('opt-ext-float-container')) return;
+
+        injectSellerStyles();
+
+        // 1. Floating panel
+        floatBtnContainer = document.createElement('div');
+        floatBtnContainer.id = 'opt-ext-float-container';
+        floatBtnContainer.style.cssText = `
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            z-index: 10000;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            font-family: 'Inter', system-ui, -apple-system, sans-serif;
+        `;
+
+        const panelHeader = document.createElement('div');
+        panelHeader.className = 'opt-ext-panel-header';
+
+        const panelTitle = document.createElement('div');
+        panelTitle.className = 'opt-ext-panel-title';
+        panelTitle.textContent = 'Ассистент отзывов';
+
+        const panelTitleWrap = document.createElement('div');
+        panelTitleWrap.className = 'opt-ext-panel-title-wrap';
+        panelTitleWrap.append(createBrandMark(), panelTitle);
+
+        const panelBadge = document.createElement('span');
+        panelBadge.className = 'opt-ext-panel-badge';
+        panelBadge.textContent = 'OZON';
+
+        panelHeader.append(panelTitleWrap, panelBadge);
+
+        selectionSummary = document.createElement('div');
+        selectionSummary.id = 'opt-ext-selection-summary';
+        selectionSummary.textContent = 'Выбрано: 0 · Готово: 0';
+
+        floatBtn = document.createElement('button');
+        floatBtn.id = 'opt-ext-submit-btn';
+        floatBtn.textContent = 'Отправить ответы (0)';
+        floatBtn.disabled = true;
+        floatBtn.style.cssText = `
+            background: linear-gradient(135deg, #005bff, #003db3);
+            color: white;
+            border: none;
+            padding: 12px 20px;
+            border-radius: 8px;
+            font-weight: bold;
+            font-size: 14px;
+            box-shadow: 0 4px 15px rgba(0, 91, 255, 0.3);
+            cursor: pointer;
+            transition: transform 200ms ease, background-color 200ms ease, box-shadow 200ms ease, color 200ms ease;
+        `;
+
+        floatBtn.addEventListener('click', handleFloatBtnClick);
+        floatBtnContainer.append(panelHeader, selectionSummary, floatBtn);
+        document.body.appendChild(floatBtnContainer);
+        makeFloatingPanelDraggable(floatBtnContainer, panelHeader, 'optExtReviewsPanelPosition');
+
+        // 2. Overlay container
+        overlayContainer = document.createElement('div');
+        overlayContainer.id = 'opt-ext-checkbox-overlay';
+        overlayContainer.style.cssText = 'position: absolute; top: 0; left: 0; width: 0; height: 0; overflow: visible; z-index: 9998; pointer-events: none;';
+
+        // 3. Select-all checkbox wrapper
+        checkAllWrapper = document.createElement('div');
+        checkAllWrapper.id = 'opt-ext-check-all-wrapper';
+        checkAllWrapper.style.cssText = 'position: absolute; display: none; z-index: 9999; pointer-events: none; box-sizing: border-box;';
+        
+        const selectAllCheck = document.createElement('input');
+        selectAllCheck.type = 'checkbox';
+        selectAllCheck.className = 'opt-ext-reply-checkbox-all';
+        selectAllCheck.style.cssText = 'cursor: pointer; transform: scale(1.2); pointer-events: auto;';
+        selectAllCheck.addEventListener('change', handleSelectAllChange);
+        checkAllWrapper.appendChild(selectAllCheck);
+        overlayContainer.appendChild(checkAllWrapper);
+
+        // 4. Bulk select dropdown wrapper
+        bulkSelectWrapper = document.createElement('div');
+        bulkSelectWrapper.id = 'opt-ext-bulk-select-wrapper';
+        bulkSelectWrapper.style.cssText = 'position: absolute; display: none; z-index: 9999; pointer-events: none; box-sizing: border-box;';
+
+        const bulkSelect = document.createElement('select');
+        bulkSelect.className = 'opt-ext-bulk-template-select';
+        bulkSelect.style.cssText = `
+            padding: 4px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 11px;
+            outline: none;
+            width: 100px;
+            background: white;
+            pointer-events: auto;
+        `;
+        bulkSelect.addEventListener('change', handleBulkSelectChange);
+        bulkSelectWrapper.appendChild(bulkSelect);
+        overlayContainer.appendChild(bulkSelectWrapper);
+
+        // Position on window events
+        window.addEventListener('resize', requestReposition);
+        window.addEventListener('scroll', requestReposition, true);
+
+        // Observe DOM changes
+        observer = new MutationObserver((mutations) => {
+            const extensionSelector = [
+                '#opt-ext-float-container',
+                '#opt-ext-checkbox-overlay',
+                '#opt-ext-check-all-wrapper',
+                '#opt-ext-bulk-select-wrapper',
+                '.opt-ext-checkbox-wrapper',
+                '.opt-ext-select-wrapper',
+                '.opt-ext-panel-header',
+                '#opt-ext-selection-summary',
+                '[data-opt-ext-reply-column]'
+            ].join(',');
+
+            const hasExternalMutations = mutations.some(mut => {
+                const target = mut.target;
+                if (target && typeof target.closest === 'function' && target.closest(extensionSelector)) {
+                    return false;
+                }
+
+                const changedNodes = [
+                    ...Array.from(mut.addedNodes || []),
+                    ...Array.from(mut.removedNodes || [])
+                ];
+                return changedNodes.length === 0 || changedNodes.some(node => (
+                    node.nodeType === 1 && !node.matches(extensionSelector)
+                ));
+            });
+            if (hasExternalMutations) {
+                detectColumnIndices();
+                requestReposition();
+            }
+        });
+        observer.observe(document.body, { childList: true, subtree: true });
+
+        detectColumnIndices();
+        requestReposition();
+        populateBulkSelect();
+    }
+
+    function updateFloatBtn() {
+        if (!floatBtn) return;
+
+        const selectedCount = Array.from(rowStates.values())
+            .filter(state => state.checked).length;
+        const queueCount = getQueueItems().length;
+        if (selectionSummary) {
+            selectionSummary.textContent = queueCount > 0
+                ? `Выбрано: ${selectedCount} · Готово к отправке: ${queueCount}`
+                : `Выбрано: ${selectedCount} · Выберите шаблон`;
+        }
+
+        if (isRunning) {
+            floatBtn.textContent = 'Остановить';
+            floatBtn.disabled = false;
+            floatBtn.style.background = '#dc3545';
+            floatBtn.style.boxShadow = '0 4px 15px rgba(220, 53, 69, 0.3)';
+        } else {
+            const count = getQueueItems().length;
+            floatBtn.textContent = `Отправить ответы (${count})`;
+            floatBtn.disabled = count === 0;
+            floatBtn.style.background = count > 0 
+                ? 'linear-gradient(135deg, #005bff, #003db3)' 
+                : '#cccccc';
+            floatBtn.style.boxShadow = count > 0 
+                ? '0 4px 15px rgba(0, 91, 255, 0.3)' 
+                : 'none';
+        }
+    }
+
+    function getQueueItems() {
+        return Array.from(rowStates.entries())
+            .filter(([_, state]) => (
+                state.checked &&
+                state.templateId &&
+                state.repliesCount === 0 &&
+                (state.templateId !== DEEPSEEK_AI_TEMPLATE_ID || state.hasReviewText)
+            ))
+            .map(([rowId, state]) => ({ rowId, ...state }));
+    }
+
+    let reviewColIndex = -1;
+    let repliesColIndex = -1;
+    let productColIndex = -1;
+    let dateColIndex = -1;
+    let registeredScrollParents = new Set();
+
+    function findHeaderTable() {
+        const tables = document.querySelectorAll('table');
+        for (let table of tables) {
+            const headers = Array.from(table.querySelectorAll('thead th'));
+            let hasReview = false;
+            let hasProduct = false;
+            
+            headers.forEach(th => {
+                const text = th.textContent.trim().toLowerCase();
+                if (text.includes('отзыв')) hasReview = true;
+                if (text.includes('товар') || text.includes('название') || text.includes('артикул')) hasProduct = true;
+            });
+            
+            if (hasReview && hasProduct) {
+                return table;
+            }
+        }
+        return null;
+    }
+
+    function findRowsTable() {
+        const tables = document.querySelectorAll('table');
+        for (let table of tables) {
+            const tbody = table.querySelector('tbody');
+            if (tbody) {
+                const trs = tbody.querySelectorAll('tr');
+                for (let tr of trs) {
+                    if (tr.querySelector('img')) {
+                        return table;
+                    }
+                }
+            }
+        }
+        const headerTable = findHeaderTable();
+        for (let table of tables) {
+            if (table === headerTable) continue;
+            const tbody = table.querySelector('tbody');
+            if (tbody && tbody.querySelectorAll('tr').length > 0) {
+                return table;
+            }
+        }
+        return null;
+    }
+
+    function registerScrollParentListener(table) {
+        if (!table) return;
+        let parent = table.parentElement;
+        while (parent && parent !== document.body) {
+            const style = window.getComputedStyle(parent);
+            if (style.overflowY === 'auto' || style.overflowY === 'scroll' || style.overflow === 'auto' || style.overflow === 'scroll') {
+                if (!registeredScrollParents.has(parent)) {
+                    parent.addEventListener('scroll', requestReposition);
+                    registeredScrollParents.add(parent);
+                }
+            }
+            parent = parent.parentElement;
+        }
+    }
+
+    function detectColumnIndices() {
+        const table = findHeaderTable();
+        if (!table) return;
+
+        const ths = table.querySelectorAll('thead th');
+        const headers = Array.from(ths);
+        if (headers.length > 0) {
+            let currentCellIndex = 0;
+            headers.forEach((th) => {
+                const text = th.textContent.trim().toLowerCase();
+                const colspan = parseInt(th.getAttribute('colspan') || '1', 10) || 1;
+                
+                if (text === 'отзыв') {
+                    reviewColIndex = currentCellIndex;
+                } else if (text.startsWith('ответы') || text.startsWith('ответ')) {
+                    repliesColIndex = currentCellIndex;
+                } else if (text === 'название товара' || text === 'товар') {
+                    productColIndex = currentCellIndex;
+                } else if (text === 'дата публикации' || text === 'дата') {
+                    dateColIndex = currentCellIndex;
+                }
+                
+                currentCellIndex += colspan;
+            });
+        }
+    }
+
+    function ensureExtensionColumn(table) {
+        if (!table || repliesColIndex === -1) return;
+
+        const colgroup = table.querySelector('colgroup');
+        if (colgroup && !colgroup.querySelector('col[data-opt-ext-reply-column]')) {
+            const extensionCol = document.createElement('col');
+            extensionCol.setAttribute('data-opt-ext-reply-column', 'true');
+            extensionCol.style.width = '190px';
+            const nextCol = colgroup.children[repliesColIndex + 1] || null;
+            colgroup.insertBefore(extensionCol, nextCol);
+        }
+    }
+
+    function ensureExtensionHeaderCell(headerTable) {
+        if (!headerTable) return null;
+
+        let extensionTh = headerTable.querySelector('thead th[data-opt-ext-reply-column]');
+        if (extensionTh) return extensionTh;
+
+        const headerCells = Array.from(headerTable.querySelectorAll('thead th'));
+        const repliesTh = headerCells.find(th => (
+            th.textContent.trim().toLowerCase().startsWith('ответы')
+        ));
+        if (!repliesTh) return null;
+
+        extensionTh = document.createElement('th');
+        extensionTh.setAttribute('data-opt-ext-reply-column', 'true');
+        extensionTh.className = 'opt-ext-reply-column';
+        extensionTh.setAttribute('aria-label', 'Шаблон ответа');
+        repliesTh.insertAdjacentElement('afterend', extensionTh);
+        return extensionTh;
+    }
+
+    function ensureExtensionRowCell(row) {
+        if (!row) return null;
+
+        let extensionTd = row.querySelector('td[data-opt-ext-reply-column]');
+        if (extensionTd) return extensionTd;
+
+        const cells = row.querySelectorAll('td');
+        const repliesTd = repliesColIndex !== -1
+            ? cells[repliesColIndex]
+            : cells[cells.length - 1];
+        if (!repliesTd) return null;
+
+        extensionTd = document.createElement('td');
+        extensionTd.setAttribute('data-opt-ext-reply-column', 'true');
+        extensionTd.className = 'opt-ext-reply-column';
+        repliesTd.insertAdjacentElement('afterend', extensionTd);
+        return extensionTd;
+    }
+
+    function requestReposition() {
+        if (isRepositioning) return;
+        isRepositioning = true;
+        requestAnimationFrame(() => {
+            repositionOverlay();
+            isRepositioning = false;
+        });
+    }
+
+    function repositionOverlay() {
+        const headerTable = findHeaderTable();
+        const rowsTable = findRowsTable();
+
+        detectColumnIndices();
+        ensureExtensionColumn(headerTable);
+        ensureExtensionColumn(rowsTable);
+        
+        if (rowsTable) {
+            registerScrollParentListener(rowsTable);
+        }
+
+        if (!rowsTable || !overlayContainer) {
+            if (checkAllWrapper) checkAllWrapper.style.display = 'none';
+            overlayElements.forEach(elPair => {
+                elPair.checkWrapper.style.display = 'none';
+                elPair.selectWrapper.style.display = 'none';
+            });
+            return;
+        }
+
+        const extensionTh = ensureExtensionHeaderCell(headerTable);
+        if (extensionTh && checkAllWrapper && bulkSelectWrapper) {
+            if (checkAllWrapper.parentElement !== extensionTh) {
+                extensionTh.appendChild(checkAllWrapper);
+            }
+            if (bulkSelectWrapper.parentElement !== extensionTh) {
+                extensionTh.appendChild(bulkSelectWrapper);
+            }
+
+            checkAllWrapper.style.display = 'inline-flex';
+            bulkSelectWrapper.style.display = 'inline-flex';
+        } else {
+            if (checkAllWrapper) checkAllWrapper.style.display = 'none';
+            if (bulkSelectWrapper) bulkSelectWrapper.style.display = 'none';
+        }
+
+        const rows = rowsTable.querySelectorAll('tbody > tr');
+        const visibleRowIds = new Set();
+
+        rows.forEach((tr, i) => {
+            try {
+                const cells = tr.querySelectorAll('td');
+                if (cells.length === 0) return;
+
+                const rowData = getRowData(tr, i);
+                if (!rowData) return;
+
+                const firstTd = cells[0];
+                const lastTd = cells[cells.length - 1];
+
+                visibleRowIds.add(rowData.rowId);
+
+                if (!rowStates.has(rowData.rowId)) {
+                    rowStates.set(rowData.rowId, {
+                        checked: false,
+                        templateId: '',
+                        templateText: '',
+                        repliesCount: rowData.repliesCount,
+                        hasReviewText: Boolean(rowData.reviewText)
+                    });
+                } else {
+                    const st = rowStates.get(rowData.rowId);
+                    st.hasReviewText = Boolean(rowData.reviewText);
+                    if (!st.hasReviewText && st.templateId === DEEPSEEK_AI_TEMPLATE_ID) {
+                        st.templateId = '';
+                        st.templateText = '';
+                    }
+                    if (st.repliesCount !== rowData.repliesCount) {
+                        st.repliesCount = rowData.repliesCount;
+                        if (rowData.repliesCount > 0) {
+                            st.checked = false;
+                        }
+                    }
+                }
+
+                const state = rowStates.get(rowData.rowId);
+
+                let elPair = overlayElements.get(rowData.rowId);
+                if (!elPair) {
+                    elPair = createRowOverlayElements(rowData.rowId);
+                    overlayElements.set(rowData.rowId, elPair);
+                }
+
+                const checkInput = elPair.checkWrapper.querySelector('.opt-ext-reply-checkbox');
+                if (checkInput) {
+                    checkInput.checked = state.checked;
+                    checkInput.disabled = rowData.repliesCount > 0;
+                }
+
+                const select = elPair.selectWrapper.querySelector('.opt-ext-template-select');
+                if (select) {
+                    select.value = state.templateId;
+                    select.disabled = !state.checked;
+                }
+
+                const extensionTd = ensureExtensionRowCell(tr);
+                if (extensionTd) {
+                    if (elPair.checkWrapper.parentElement !== extensionTd) {
+                        extensionTd.appendChild(elPair.checkWrapper);
+                    }
+                    elPair.checkWrapper.style.display = 'inline-flex';
+
+                    if (elPair.selectWrapper.parentElement !== extensionTd) {
+                        extensionTd.appendChild(elPair.selectWrapper);
+                    }
+
+                    if (rowData.repliesCount > 0) {
+                        elPair.selectWrapper.style.display = 'inline-flex';
+                        if (select) select.style.display = 'none';
+                        let span = elPair.selectWrapper.querySelector('.opt-ext-replied-span');
+                        if (!span) {
+                            span = document.createElement('span');
+                            span.className = 'opt-ext-replied-span';
+                            span.textContent = 'Уже отвечено';
+                            span.style.cssText = 'color: #888; font-size: 12px; font-style: italic; margin-right: 10px;';
+                            elPair.selectWrapper.appendChild(span);
+                        }
+                    } else {
+                        let span = elPair.selectWrapper.querySelector('.opt-ext-replied-span');
+                        if (span) span.remove();
+                        if (select) select.style.display = 'block';
+                        elPair.selectWrapper.style.display = state.checked ? 'inline-flex' : 'none';
+                    }
+                } else {
+                    elPair.selectWrapper.style.display = 'none';
+                }
+            } catch (e) {
+                console.error(`[opt-ext] Ошибка на строке ${i}:`, e);
+            }
+        });
+
+        overlayElements.forEach((elPair, rowId) => {
+            if (!visibleRowIds.has(rowId)) {
+                elPair.checkWrapper.style.display = 'none';
+                elPair.selectWrapper.style.display = 'none';
+            }
+        });
+
+        updateSelectAllState();
+        updateFloatBtn();
+    }
+
+    function createRowOverlayElements(rowId) {
+        const checkWrapper = document.createElement('div');
+        checkWrapper.className = 'opt-ext-checkbox-wrapper';
+        checkWrapper.style.cssText = `
+            position: absolute;
+            display: none;
+            align-items: center;
+            justify-content: center;
+            background: rgba(240, 245, 255, 0.95);
+            border-right: 1px dashed #c0d6ff;
+            pointer-events: none;
+            z-index: 9999;
+        `;
+
+        const checkInput = document.createElement('input');
+        checkInput.type = 'checkbox';
+        checkInput.className = 'opt-ext-reply-checkbox';
+        checkInput.style.cssText = 'cursor: pointer; transform: scale(1.1); pointer-events: auto;';
+        checkInput.addEventListener('change', (e) => {
+            const state = rowStates.get(rowId);
+            if (state) {
+                state.checked = e.target.checked;
+                if (!state.checked) {
+                    state.templateId = '';
+                    state.templateText = '';
+                }
+                requestReposition();
+            }
+        });
+        checkWrapper.appendChild(checkInput);
+        overlayContainer.appendChild(checkWrapper);
+
+        const selectWrapper = document.createElement('div');
+        selectWrapper.className = 'opt-ext-select-wrapper';
+        selectWrapper.style.cssText = `
+            position: absolute;
+            display: none;
+            align-items: center;
+            justify-content: flex-end;
+            padding-right: 10px;
+            pointer-events: none;
+            z-index: 9999;
+            box-sizing: border-box;
+        `;
+
+        const select = document.createElement('select');
+        select.className = 'opt-ext-template-select';
+        select.style.cssText = `
+            padding: 6px;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            font-size: 12px;
+            outline: none;
+            width: 130px;
+            background: white;
+            pointer-events: auto;
+        `;
+        populateSelect(select, rowId);
+        select.addEventListener('change', (e) => handleSelectChange(e, rowId));
+        selectWrapper.appendChild(select);
+        overlayContainer.appendChild(selectWrapper);
+
+        return { checkWrapper, selectWrapper };
+    }
+
+    function getReviewTextElement(reviewCell) {
+        if (!reviewCell) return null;
+        const candidates = Array.from(reviewCell.querySelectorAll('[title]'));
+        const found = candidates.find(c => {
+            const tag = c.tagName.toLowerCase();
+            if (tag === 'img' || tag === 'svg' || tag === 'button') return false;
+            if (c.querySelector('img') || c.querySelector('svg')) return false;
+            if (c.closest('[class*="media"]') || c.closest('[class*="photo"]') || c.closest('[class*="video"]')) return false;
+            return true;
+        });
+        return found || candidates[0] || null;
+    }
+
+    function normalizeReviewText(value) {
+        return String(value || '').replace(/\s+/g, ' ').trim();
+    }
+
+    function isRatingOnlyReviewText(value) {
+        const normalized = normalizeReviewText(value).toLowerCase();
+        return /^(?:[-–—]\s*)?только с оценкой$/.test(normalized);
+    }
+
+    function extractReviewText(reviewCell) {
+        if (!reviewCell) return '';
+
+        const cellText = normalizeReviewText(reviewCell.textContent);
+        if (isRatingOnlyReviewText(cellText)) return '';
+
+        const titleEl = getReviewTextElement(reviewCell);
+        const titleText = normalizeReviewText(titleEl?.getAttribute('title'));
+        return titleText || cellText;
+    }
+
+    function getRowData(tr, i = 0) {
+        const cells = tr.querySelectorAll('td');
+        if (cells.length === 0) return null;
+
+        let reviewText = '';
+        let repliesCount = 0;
+        let productText = '';
+        let dateText = '';
+
+        if (reviewColIndex !== -1 && cells[reviewColIndex]) {
+            reviewText = extractReviewText(cells[reviewColIndex]);
+        }
+
+        if (repliesColIndex !== -1 && cells[repliesColIndex]) {
+            const repliesCellClone = cells[repliesColIndex].cloneNode(true);
+            repliesCellClone.querySelectorAll(
+                '#opt-ext-check-all-wrapper, #opt-ext-bulk-select-wrapper, .opt-ext-checkbox-wrapper, .opt-ext-select-wrapper'
+            ).forEach(el => el.remove());
+            const repliesStr = repliesCellClone.textContent.trim();
+            repliesCount = parseInt(repliesStr.replace(/[^\d]/g, ''), 10) || 0;
+        }
+
+        if (productColIndex !== -1 && cells[productColIndex]) {
+            productText = cells[productColIndex].textContent.trim();
+        }
+
+        if (dateColIndex !== -1 && cells[dateColIndex]) {
+            dateText = cells[dateColIndex].textContent.trim();
+        }
+
+        const rowId = `${productText}::${reviewText}::${dateText}::row_${i}`;
+        return { rowId, reviewText, repliesCount, productText, dateText };
+    }
+
+    function populateSelect(select, rowId) {
+        select.innerHTML = '';
+        const defaultOpt = document.createElement('option');
+        defaultOpt.value = '';
+        defaultOpt.textContent = 'Не выбран';
+        select.appendChild(defaultOpt);
+
+        const aiOpt = document.createElement('option');
+        aiOpt.value = DEEPSEEK_AI_TEMPLATE_ID;
+        aiOpt.textContent = '✨ DeepSeek AI';
+        select.appendChild(aiOpt);
+
+        savedTemplates.forEach(tpl => {
+            const opt = document.createElement('option');
+            opt.value = tpl.id;
+            opt.textContent = tpl.title;
+            select.appendChild(opt);
+        });
+
+        if (rowStates.has(rowId)) {
+            const state = rowStates.get(rowId);
+            const aiOption = select.querySelector(`option[value="${DEEPSEEK_AI_TEMPLATE_ID}"]`);
+            if (aiOption) {
+                aiOption.disabled = !state.hasReviewText;
+                aiOption.title = state.hasReviewText ? '' : 'У отзыва нет текста';
+            }
+            select.value = state.templateId;
+        } else {
+            select.value = '';
+        }
+    }
+
+    function populateBulkSelect() {
+        const bulkSelect = bulkSelectWrapper ? bulkSelectWrapper.querySelector('.opt-ext-bulk-template-select') : null;
+        if (!bulkSelect) return;
+        bulkSelect.innerHTML = '';
+
+        const defaultOpt = document.createElement('option');
+        defaultOpt.value = '';
+        defaultOpt.textContent = 'Применить...';
+        bulkSelect.appendChild(defaultOpt);
+
+        const aiOpt = document.createElement('option');
+        aiOpt.value = DEEPSEEK_AI_TEMPLATE_ID;
+        aiOpt.textContent = '✨ DeepSeek AI';
+        bulkSelect.appendChild(aiOpt);
+
+        savedTemplates.forEach(tpl => {
+            const opt = document.createElement('option');
+            opt.value = tpl.id;
+            opt.textContent = tpl.title;
+            bulkSelect.appendChild(opt);
+        });
+        bulkSelect.value = '';
+    }
+
+    function handleBulkSelectChange(e) {
+        const templateId = e.target.value;
+        if (!templateId) return;
+
+        const checkedRows = Array.from(rowStates.entries()).filter(([_, state]) => state.checked && state.repliesCount === 0);
+        if (checkedRows.length === 0) {
+            alert('Сначала отметьте товары чекбоксом');
+            e.target.value = '';
+            return;
+        }
+
+        if (templateId === DEEPSEEK_AI_TEMPLATE_ID) {
+            const rowsWithText = checkedRows.filter(([_, state]) => state.hasReviewText);
+            if (rowsWithText.length === 0) {
+                alert('DeepSeek доступен только для отзывов с текстом.');
+                e.target.value = '';
+                return;
+            }
+
+            if (rowsWithText.length < checkedRows.length) {
+                alert(`DeepSeek назначен только для ${rowsWithText.length} отзывов с текстом. Строки «Только с оценкой» пропущены.`);
+            }
+
+            rowsWithText.forEach(([_, state]) => {
+                state.templateId = DEEPSEEK_AI_TEMPLATE_ID;
+                state.templateText = '';
+            });
+        } else {
+            const tpl = savedTemplates.find(t => t.id === templateId);
+            if (tpl) {
+                checkedRows.forEach(([_, state]) => {
+                    state.templateId = tpl.id;
+                    state.templateText = tpl.text;
+                });
+            }
+        }
+
+        e.target.value = '';
+        requestReposition();
+    }
+
+    function updateAllDropdowns() {
+        populateBulkSelect();
+        const selects = document.querySelectorAll('.opt-ext-template-select');
+        selects.forEach(select => {
+            const wrapper = select.closest('.opt-ext-select-wrapper');
+            if (wrapper) {
+                for (let [key, val] of overlayElements.entries()) {
+                    if (val.selectWrapper === wrapper) {
+                        populateSelect(select, key);
+                        break;
+                    }
+                }
+            }
+        });
+    }
+
+    function handleSelectChange(e, rowId) {
+        const templateId = e.target.value;
+        const state = rowStates.get(rowId);
+        if (!state) return;
+
+        if (!templateId) {
+            state.templateId = '';
+            state.templateText = '';
+        } else if (templateId === DEEPSEEK_AI_TEMPLATE_ID) {
+            if (!state.hasReviewText) {
+                e.target.value = '';
+                state.templateId = '';
+                state.templateText = '';
+                updateFloatBtn();
+                return;
+            }
+            state.templateId = DEEPSEEK_AI_TEMPLATE_ID;
+            state.templateText = '';
+        } else {
+            const tpl = savedTemplates.find(t => t.id === templateId);
+            if (tpl) {
+                state.templateId = tpl.id;
+                state.templateText = tpl.text;
+            }
+        }
+
+        const bulkSelect = bulkSelectWrapper ? bulkSelectWrapper.querySelector('.opt-ext-bulk-template-select') : null;
+        if (bulkSelect) {
+            bulkSelect.value = '';
+        }
+
+        updateFloatBtn();
+    }
+
+    function handleSelectAllChange(e) {
+        const checked = e.target.checked;
+        const rowsTable = findRowsTable();
+        if (!rowsTable) return;
+
+        const rows = rowsTable.querySelectorAll('tbody > tr');
+        rows.forEach((tr, i) => {
+            const rowData = getRowData(tr, i);
+            if (!rowData || rowData.repliesCount > 0) return;
+
+            const state = rowStates.get(rowData.rowId);
+            if (state) {
+                state.checked = checked;
+                if (!checked) {
+                    state.templateId = '';
+                    state.templateText = '';
+                }
+            }
+        });
+
+        requestReposition();
+    }
+
+    function updateSelectAllState() {
+        const selectAllCheck = document.querySelector('.opt-ext-reply-checkbox-all');
+        if (!selectAllCheck) return;
+
+        const rowsTable = findRowsTable();
+        if (!rowsTable) return;
+
+        const rows = rowsTable.querySelectorAll('tbody > tr');
+        let totalEnabled = 0;
+        let totalChecked = 0;
+
+        rows.forEach((tr, i) => {
+            const rowData = getRowData(tr, i);
+            if (rowData && rowData.repliesCount === 0) {
+                totalEnabled++;
+                const state = rowStates.get(rowData.rowId);
+                if (state && state.checked) {
+                    totalChecked++;
+                }
+            }
+        });
+
+        if (totalEnabled === 0) {
+            selectAllCheck.checked = false;
+            selectAllCheck.indeterminate = false;
+        } else if (totalChecked === totalEnabled) {
+            selectAllCheck.checked = true;
+            selectAllCheck.indeterminate = false;
+        } else if (totalChecked === 0) {
+            selectAllCheck.checked = false;
+            selectAllCheck.indeterminate = false;
+        } else {
+            selectAllCheck.checked = false;
+            selectAllCheck.indeterminate = true;
+        }
+    }
+
+    function handleFloatBtnClick() {
+        if (isRunning) {
+            isRunning = false;
+            updateFloatBtn();
+        } else {
+            startSending();
+        }
+    }
+
+    async function startSending() {
+        isRunning = true;
+        failedReplies = [];
+        const skippedReplies = [];
+        updateFloatBtn();
+
+        const itemsToSend = getQueueItems();
+        logActivity({
+            action: 'seller_reviews_reply',
+            status: 'started',
+            title: 'Ozon Seller: автоответы на отзывы запущены',
+            message: `Отзывов в очереди: ${itemsToSend.length}.`,
+            platform: 'ozon'
+        });
+
+        for (let i = 0; i < itemsToSend.length; i++) {
+            if (!isRunning) break;
+
+            const item = itemsToSend[i];
+            let result = false;
+
+            try {
+                result = await sendSingleReply(item);
+            } catch (err) {
+                console.error("Error processing row:", item.rowId, err);
+            }
+
+            if (result === 'skipped') {
+                skippedReplies.push(item);
+                requestReposition();
+                continue;
+            }
+
+            const success = result === true;
+            if (success) {
+                const state = rowStates.get(item.rowId);
+                if (state) {
+                    state.checked = false;
+                    state.templateId = '';
+                    state.templateText = '';
+                    state.repliesCount = 1;
+                }
+            } else {
+                failedReplies.push(item);
+            }
+
+            requestReposition();
+
+            if (isRunning && i < itemsToSend.length - 1) {
+                if (replySettings.delayEnabled) {
+                    const min = replySettings.minDelay || 2;
+                    const max = replySettings.maxDelay || 5;
+                    const delaySec = Math.floor(Math.random() * (max - min + 1)) + min;
+                    await sleep(delaySec * 1000);
+                }
+            }
+        }
+
+        isRunning = false;
+        requestReposition();
+
+        logActivity({
+            action: 'seller_reviews_reply',
+            status: failedReplies.length ? 'partial' : 'completed',
+            title: `Ozon Seller: автоответы ${failedReplies.length ? 'завершены частично' : 'завершены'}`,
+            message: `Успешно: ${itemsToSend.length - failedReplies.length - skippedReplies.length}; ошибок: ${failedReplies.length}; пропущено: ${skippedReplies.length}.`,
+            platform: 'ozon'
+        });
+
+        if (failedReplies.length > 0) {
+            const details = failedReplies.map(f => f.rowId.split('::')[0] || 'Отзыв').join('\n');
+            alert(`Отправка завершена.\nНе удалось отправить автоответы на следующие отзывы:\n\n${details}`);
+        } else if (skippedReplies.length > 0) {
+            alert(`Пропущено отзывов без текста: ${skippedReplies.length}. Выберите строки с текстом отзыва.`);
+        } else {
+            alert('Все автоответы успешно отправлены!');
+        }
+    }
+
+    function requestDeepSeekReviewAnswer(data) {
+        return new Promise(resolve => {
+            chrome.runtime.sendMessage({
+                action: 'deepseek_generate_review_answer',
+                data
+            }, response => {
+                if (chrome.runtime.lastError) {
+                    resolve({ success: false, error: chrome.runtime.lastError.message });
+                    return;
+                }
+                resolve(response || { success: false, error: 'Пустой ответ от DeepSeek' });
+            });
+        });
+    }
+
+    async function sendSingleReply(item) {
+        try {
+            let tr = findRowElement(item.rowId);
+            if (!tr) {
+                for (let waitCount = 0; waitCount < 10; waitCount++) {
+                    await sleep(300);
+                    tr = findRowElement(item.rowId);
+                    if (tr) break;
+                }
+                if (!tr) return false;
+            }
+
+            let rowIdx = 0;
+            const parts = item.rowId.split('::row_');
+            if (parts.length > 1) {
+                rowIdx = parseInt(parts[1], 10) || 0;
+            }
+
+            const rowData = getRowData(tr, rowIdx);
+            if (rowData && rowData.repliesCount > 0) {
+                return true;
+            }
+
+            if (item.templateId === DEEPSEEK_AI_TEMPLATE_ID && !rowData?.reviewText?.trim()) {
+                const state = rowStates.get(item.rowId);
+                if (state) {
+                    state.checked = false;
+                    state.templateId = '';
+                    state.templateText = '';
+                }
+                console.warn('[opt-ext] Пропуск отзыва без текста:', item.rowId);
+                return 'skipped';
+            }
+
+            tr.scrollIntoView({ block: 'center' });
+            await sleep(500);
+
+            const cells = tr.querySelectorAll('td');
+            const reviewCell = cells[reviewColIndex];
+            if (!reviewCell) return false;
+
+            const clickable = getReviewTextElement(reviewCell);
+            if (!clickable) return false;
+
+            clickable.click();
+
+            const formLoaded = await waitForElement('#AnswerCommentForm', 5000);
+            if (!formLoaded) return false;
+
+            const textarea = document.querySelector('#AnswerCommentForm');
+            if (!textarea) return false;
+
+            let answerText = item.templateText || '';
+            if (item.templateId === DEEPSEEK_AI_TEMPLATE_ID) {
+                const aiResponse = await requestDeepSeekReviewAnswer({
+                    product: rowData?.productText || '',
+                    review: rowData?.reviewText || '',
+                    date: rowData?.dateText || ''
+                });
+                if (!aiResponse.success || !aiResponse.answer?.trim()) {
+                    console.error('[opt-ext] Ошибка генерации ответа на отзыв:', aiResponse.error || 'Пустой ответ');
+                    const closeBtn = findCloseButton(textarea);
+                    if (closeBtn) closeBtn.click();
+                    return false;
+                }
+                answerText = aiResponse.answer.trim();
+            }
+
+            if (!answerText.trim()) {
+                const closeBtn = findCloseButton(textarea);
+                if (closeBtn) closeBtn.click();
+                return false;
+            }
+            setNativeValue(textarea, answerText);
+
+            let parent = textarea.parentElement;
+            let submitBtn = null;
+            while (parent) {
+                const candidates = parent.querySelectorAll('button[type="submit"]');
+                for (let btn of candidates) {
+                    if (btn.textContent.trim() === '') {
+                        submitBtn = btn;
+                        break;
+                    }
+                }
+                if (submitBtn) break;
+                parent = parent.parentElement;
+            }
+
+            if (!submitBtn) return false;
+            submitBtn.click();
+
+            let sentConfirmed = false;
+            for (let poll = 0; poll < 10; poll++) {
+                await sleep(300);
+                const currentTextarea = document.querySelector('#AnswerCommentForm');
+                if (!currentTextarea || currentTextarea.value === '') {
+                    sentConfirmed = true;
+                    break;
+                }
+            }
+
+            const closeBtn = findCloseButton(textarea);
+            if (closeBtn) {
+                closeBtn.click();
+                await sleep(500);
+            }
+
+            return true;
+        } catch (e) {
+            console.error('[opt-ext] Ошибка в sendSingleReply:', e);
+            return false;
+        }
+    }
+
+    function findRowElement(rowId) {
+        const rowsTable = findRowsTable();
+        if (!rowsTable) return null;
+        const rows = rowsTable.querySelectorAll('tbody > tr');
+        for (let i = 0; i < rows.length; i++) {
+            const tr = rows[i];
+            const data = getRowData(tr, i);
+            if (data && data.rowId === rowId) {
+                return tr;
+            }
+        }
+        return null;
+    }
+
+    function findCloseButton(textarea) {
+        let parent = textarea.parentElement;
+        while (parent) {
+            const closeBtn = parent.querySelector('button[type="button"]');
+            if (closeBtn) return closeBtn;
+            parent = parent.parentElement;
+        }
+        return document.querySelector('button[type="button"]');
+    }
+
+    function waitForElement(selector, timeout) {
+        return new Promise((resolve) => {
+            const start = Date.now();
+            const timer = setInterval(() => {
+                const el = document.querySelector(selector);
+                if (el) {
+                    clearInterval(timer);
+                    resolve(true);
+                } else if (Date.now() - start > timeout) {
+                    clearInterval(timer);
+                    resolve(false);
+                }
+            }, 100);
+        });
+    }
+
+    // =========================================================================
+    // MODULE 2: Bulk Rich-Content Filling (seller.ozon.ru/app/products/edit/*)
+    // =========================================================================
+
+    const COL_ID_ANNOTATION = 'attribute#4191';
+    const COL_ID_RICH_CONTENT = 'attribute#11254';
+    const COL_ID_BRAND = 'attribute#85';
+    const COL_ID_MODEL = 'attribute#9048';
+
+    let richFillerRunning = false;
+    let richFillerPaused = false;
+    let richFillerStopRequested = false;
+
+    let richFillerContainer = null;
+    let richFillerControlsRow = null;
+    let richFillerBtn = null;
+    let richFillerPauseBtn = null;
+    let richFillerStopBtn = null;
+    let richFillerProgress = null;
+    let richRepositionObserver = null;
+
+    function initRichContentBulkFiller() {
+        if (document.getElementById('opt-ext-rich-filler-container')) return;
+
+        injectSellerStyles();
+
+        // 1. Create Floating UI Container
+        richFillerContainer = document.createElement('div');
+        richFillerContainer.id = 'opt-ext-rich-filler-container';
+        richFillerContainer.style.cssText = `
+            position: fixed;
+            bottom: 90px;
+            right: 20px;
+            z-index: 10000;
+            display: flex;
+            flex-direction: column;
+            align-items: flex-end;
+            gap: 8px;
+            font-family: 'Inter', system-ui, -apple-system, sans-serif;
+        `;
+
+        // 2. Progress Indicator Text
+        richFillerProgress = document.createElement('div');
+        richFillerProgress.id = 'opt-ext-rich-filler-progress';
+        richFillerProgress.style.cssText = `
+            background: rgba(15, 23, 42, 0.85);
+            color: #ffffff;
+            padding: 6px 12px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 600;
+            display: none;
+            backdrop-filter: blur(8px);
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        `;
+        richFillerProgress.textContent = '';
+
+        // 3. Control buttons row (Stop and Pause buttons left of main button)
+        richFillerControlsRow = document.createElement('div');
+        richFillerControlsRow.style.cssText = `
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        `;
+
+        // 3a. Stop Button
+        richFillerStopBtn = document.createElement('button');
+        richFillerStopBtn.id = 'opt-ext-rich-filler-stop-btn';
+        richFillerStopBtn.textContent = '⏹ Остановить';
+        richFillerStopBtn.title = 'Остановить процесс (завершится после текущего сохранения)';
+        richFillerStopBtn.style.cssText = `
+            background: rgba(225, 29, 72, 0.9);
+            color: white;
+            border: none;
+            padding: 10px 16px;
+            border-radius: 20px;
+            font-weight: 600;
+            font-size: 12px;
+            box-shadow: 0 4px 12px rgba(225, 29, 72, 0.3);
+            cursor: pointer;
+            transition: background-color 200ms ease, box-shadow 200ms ease, opacity 200ms ease;
+            display: none;
+            align-items: center;
+            gap: 6px;
+            backdrop-filter: blur(8px);
+        `;
+        richFillerStopBtn.addEventListener('click', () => {
+            if (richFillerRunning) {
+                richFillerStopRequested = true;
+                richFillerStopBtn.textContent = '⏳ Остановка...';
+                richFillerStopBtn.disabled = true;
+                richFillerStopBtn.style.opacity = '0.7';
+                console.log('[opt-ext] Запрошена остановка процесса...');
+            }
+        });
+
+        // 3b. Pause / Resume Button
+        richFillerPauseBtn = document.createElement('button');
+        richFillerPauseBtn.id = 'opt-ext-rich-filler-pause-btn';
+        richFillerPauseBtn.textContent = '⏸ Пауза';
+        richFillerPauseBtn.title = 'Поставить на паузу (остановится после нажатия Применить)';
+        richFillerPauseBtn.style.cssText = `
+            background: rgba(217, 119, 6, 0.9);
+            color: white;
+            border: none;
+            padding: 10px 16px;
+            border-radius: 20px;
+            font-weight: 600;
+            font-size: 12px;
+            box-shadow: 0 4px 12px rgba(217, 119, 6, 0.3);
+            cursor: pointer;
+            transition: background-color 200ms ease, box-shadow 200ms ease, opacity 200ms ease;
+            display: none;
+            align-items: center;
+            gap: 6px;
+            backdrop-filter: blur(8px);
+        `;
+        richFillerPauseBtn.addEventListener('click', () => {
+            if (!richFillerRunning) return;
+            if (richFillerPaused) {
+                // Resume
+                richFillerPaused = false;
+                richFillerPauseBtn.textContent = '⏸ Пауза';
+                richFillerPauseBtn.style.background = 'rgba(217, 119, 6, 0.9)';
+                console.log('[opt-ext] Процесс возобновлен пользователем.');
+            } else {
+                // Pause
+                richFillerPaused = true;
+                richFillerPauseBtn.textContent = '▶ Продолжить';
+                richFillerPauseBtn.style.background = 'rgba(16, 185, 129, 0.9)';
+                console.log('[opt-ext] Запрошена пауза...');
+            }
+        });
+
+        // 3c. Main Floating Action Button
+        richFillerBtn = document.createElement('button');
+        richFillerBtn.id = 'opt-ext-rich-filler-btn';
+        richFillerBtn.textContent = '✨ Заполнить Rich-контент';
+        richFillerBtn.title = 'Массово вставить Rich-контент из описания/аннотации товаров';
+        richFillerBtn.style.cssText = `
+            background: linear-gradient(135deg, #005bff, #003db3);
+            color: white;
+            border: none;
+            padding: 12px 20px;
+            border-radius: 24px;
+            font-weight: 600;
+            font-size: 13px;
+            box-shadow: 0 4px 15px rgba(0, 91, 255, 0.35);
+            cursor: pointer;
+            transition: transform 200ms ease, background-color 200ms ease, box-shadow 200ms ease, color 200ms ease;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        `;
+
+        richFillerBtn.addEventListener('mouseenter', () => {
+            if (!richFillerRunning) {
+                richFillerBtn.style.transform = 'translateY(-2px)';
+                richFillerBtn.style.boxShadow = '0 6px 20px rgba(0, 91, 255, 0.45)';
+            }
+        });
+        richFillerBtn.addEventListener('mouseleave', () => {
+            if (!richFillerRunning) {
+                richFillerBtn.style.transform = 'none';
+                richFillerBtn.style.boxShadow = '0 4px 15px rgba(0, 91, 255, 0.35)';
+            }
+        });
+
+        richFillerBtn.addEventListener('click', startRichContentProcessing);
+
+        richFillerControlsRow.appendChild(richFillerStopBtn);
+        richFillerControlsRow.appendChild(richFillerPauseBtn);
+        richFillerControlsRow.appendChild(richFillerBtn);
+
+        richFillerContainer.appendChild(richFillerProgress);
+        richFillerContainer.appendChild(richFillerControlsRow);
+
+        attachRichFillerUI();
+
+        // Reposition observer relative to Ozon floating assistant button
+        richRepositionObserver = new MutationObserver(() => {
+            attachRichFillerUI();
+        });
+        richRepositionObserver.observe(document.body, { childList: true, subtree: true });
+    }
+
+    function attachRichFillerUI() {
+        if (!richFillerContainer) return;
+        if (!document.body.contains(richFillerContainer)) {
+            document.body.appendChild(richFillerContainer);
+        }
+
+        const assistantBtn = document.querySelector('[data-onboarding-target="floating-ai-assistant-button"]');
+        if (assistantBtn) {
+            const parentWrapper = assistantBtn.closest('.n2d-a9f') || assistantBtn.parentElement;
+            if (parentWrapper && typeof parentWrapper.getBoundingClientRect === 'function') {
+                const rect = parentWrapper.getBoundingClientRect();
+                if (rect.bottom > 0 && rect.right > 0) {
+                    const bottomOffset = window.innerHeight - rect.top + 12;
+                    richFillerContainer.style.bottom = `${bottomOffset}px`;
+                    richFillerContainer.style.right = `${window.innerWidth - rect.right}px`;
+                }
+            }
+        }
+    }
+
+    function findCellInGridRow(rowIndex, colId) {
+        // 1. Check center container row first
+        let cell = document.querySelector(`.ag-center-cols-container .ag-row[row-index="${rowIndex}"] [col-id="${colId}"]`);
+        if (cell) return cell;
+
+        // 2. Check all row elements for this row-index
+        const rowEls = document.querySelectorAll(`.ag-row[row-index="${rowIndex}"]`);
+        for (const r of rowEls) {
+            cell = r.querySelector(`[col-id="${colId}"]`);
+            if (cell) return cell;
+        }
+
+        // 3. Fallback: check by col-id directly in table body
+        const allColCells = Array.from(document.querySelectorAll(`[col-id="${colId}"]`));
+        for (const c of allColCells) {
+            const parentRow = c.closest('.ag-row');
+            if (parentRow && parentRow.getAttribute('row-index') === String(rowIndex)) {
+                return c;
+            }
+        }
+
+        return null;
+    }
+
+    async function checkPauseAndStopState() {
+        if (richFillerStopRequested) {
+            console.log('[opt-ext] Процесс остановлен по запросу пользователя.');
+            return false;
+        }
+
+        if (richFillerPaused) {
+            console.log('[opt-ext] Процесс на паузе...');
+            if (richFillerProgress) {
+                richFillerProgress.textContent = `⏸ На паузе (${richFillerProgress.textContent.replace(' ⏸ Пауза', '')})`;
+            }
+            while (richFillerPaused && !richFillerStopRequested) {
+                await sleep(200);
+            }
+            if (richFillerStopRequested) {
+                console.log('[opt-ext] Процесс остановлен во время паузы.');
+                return false;
+            }
+            console.log('[opt-ext] Возобновление работы...');
+        }
+        return true;
+    }
+
+    async function startRichContentProcessing() {
+        if (richFillerRunning) return;
+
+        richFillerRunning = true;
+        richFillerPaused = false;
+        richFillerStopRequested = false;
+
+        richFillerBtn.disabled = true;
+        richFillerBtn.style.opacity = '0.6';
+        richFillerBtn.style.cursor = 'not-allowed';
+
+        // Show Pause and Stop buttons
+        richFillerStopBtn.style.display = 'inline-flex';
+        richFillerStopBtn.textContent = '⏹ Остановить';
+        richFillerStopBtn.disabled = false;
+        richFillerStopBtn.style.opacity = '1';
+
+        richFillerPauseBtn.style.display = 'inline-flex';
+        richFillerPauseBtn.textContent = '⏸ Пауза';
+        richFillerPauseBtn.style.background = 'rgba(217, 119, 6, 0.9)';
+
+        richFillerProgress.style.display = 'block';
+        richFillerProgress.textContent = 'Подготовка очереди...';
+
+        logActivity({
+            action: 'seller_rich_content',
+            status: 'started',
+            title: 'Ozon Seller: заполнение Rich-контента запущено',
+            message: 'Начата массовая обработка товаров.',
+            platform: 'ozon'
+        });
+
+        console.log('[opt-ext] Начало динамической обработки очереди Rich-контента с виртуальным скроллингом AG-Grid...');
+
+        const processedIndices = new Set();
+        let iterationCount = 0;
+        let consecutiveFails = 0;
+
+        function getGridViewport() {
+            return document.querySelector('.ag-body-viewport') || 
+                   document.querySelector('.ag-center-cols-viewport') || 
+                   document.querySelector('.ag-scrolls') || window;
+        }
+
+        while (richFillerRunning && !richFillerStopRequested) {
+            if (!(await checkPauseAndStopState())) break;
+            // 1. Scan current DOM for unprocessed row-index attributes
+            const currentRows = Array.from(document.querySelectorAll('.ag-row'));
+            const availableIndices = [];
+
+            currentRows.forEach(r => {
+                const idxStr = r.getAttribute('row-index');
+                if (idxStr !== null) {
+                    const idxNum = parseInt(idxStr, 10);
+                    if (!isNaN(idxNum) && !processedIndices.has(idxNum)) {
+                        availableIndices.push(idxNum);
+                    }
+                }
+            });
+
+            // Sort numeric row indices
+            availableIndices.sort((a, b) => a - b);
+
+            // 2. If no unprocessed rows found in DOM, scroll down to load next virtual batch
+            if (availableIndices.length === 0) {
+                console.log('[opt-ext] Не найдено новых строк в области видимости. Скроллим таблицу вниз...');
+                const lastRow = document.querySelector('.ag-center-cols-container .ag-row:last-child') || document.querySelector('.ag-row:last-child');
+                if (lastRow) {
+                    lastRow.scrollIntoView({ block: 'end', behavior: 'instant' });
+                } else {
+                    const vp = getGridViewport();
+                    if (vp.scrollBy) vp.scrollBy(0, 400);
+                }
+
+                await sleep(350);
+
+                // Re-scan DOM after scroll
+                const newRows = Array.from(document.querySelectorAll('.ag-row'));
+                const newIndices = [];
+                newRows.forEach(r => {
+                    const idxStr = r.getAttribute('row-index');
+                    if (idxStr !== null) {
+                        const idxNum = parseInt(idxStr, 10);
+                        if (!isNaN(idxNum) && !processedIndices.has(idxNum)) {
+                            newIndices.push(idxNum);
+                        }
+                    }
+                });
+
+                if (newIndices.length === 0) {
+                    consecutiveFails++;
+                    console.log(`[opt-ext] Проверка подгрузки строк (${consecutiveFails}/3): новые строки не появились.`);
+                    if (consecutiveFails >= 3) {
+                        console.log(`[opt-ext] Достигнут конец таблицы. Всего обработано строк: ${processedIndices.size}.`);
+                        break;
+                    }
+                    await sleep(400);
+                    continue;
+                } else {
+                    consecutiveFails = 0;
+                    availableIndices.push(...newIndices.sort((a, b) => a - b));
+                }
+            }
+
+            const nextIdx = availableIndices[0];
+            if (nextIdx === undefined) break;
+
+            iterationCount++;
+            processedIndices.add(nextIdx);
+
+            richFillerProgress.textContent = `Обработано: ${processedIndices.size} товаров (строка #${nextIdx + 1})`;
+            console.log(`[opt-ext] Итерация #${iterationCount}: обработка row-index="${nextIdx}"...`);
+
+            try {
+                await processSingleRowByIndex(nextIdx, iterationCount, processedIndices.size);
+            } catch (err) {
+                console.error(`[opt-ext] Ошибка при обработке row-index=${nextIdx}:`, err);
+            }
+        }
+
+        console.log(`[opt-ext] Массовое заполнение Rich-контента завершено! Всего обработано строк: ${processedIndices.size}.`);
+
+        logActivity({
+            action: 'seller_rich_content',
+            status: richFillerStopRequested ? 'partial' : 'completed',
+            title: `Ozon Seller: заполнение Rich-контента ${richFillerStopRequested ? 'остановлено' : 'завершено'}`,
+            message: `Обработано строк: ${processedIndices.size}.`,
+            platform: 'ozon'
+        });
+
+        richFillerRunning = false;
+        richFillerPaused = false;
+        richFillerStopRequested = false;
+
+        richFillerBtn.disabled = false;
+        richFillerBtn.style.opacity = '1';
+        richFillerBtn.style.cursor = 'pointer';
+
+        // Hide Pause and Stop buttons
+        richFillerStopBtn.style.display = 'none';
+        richFillerPauseBtn.style.display = 'none';
+
+        setTimeout(() => {
+            if (!richFillerRunning && richFillerProgress) {
+                richFillerProgress.style.display = 'none';
+            }
+        }, 4000);
+    }
+
+    async function processSingleRowByIndex(rowIndex, index, total) {
+        // 1. Find any row container for this row-index to scroll into view
+        let rowEl = document.querySelector(`.ag-center-cols-container .ag-row[row-index="${rowIndex}"]`) || 
+                    document.querySelector(`.ag-row[row-index="${rowIndex}"]`);
+
+        if (!rowEl) {
+            const anyRow = document.querySelector('.ag-row');
+            if (anyRow) anyRow.scrollIntoView({ block: 'center' });
+            await sleep(150);
+            rowEl = document.querySelector(`.ag-row[row-index="${rowIndex}"]`);
+        }
+
+        if (!rowEl) {
+            console.error(`[opt-ext] Строка ${index}/${total}: .ag-row[row-index="${rowIndex}"] не найден в DOM.`);
+            return;
+        }
+
+        // 2. Scroll row into view center vertically
+        rowEl.scrollIntoView({ block: 'center', behavior: 'instant' });
+        await sleep(100);
+
+        // 3. Find annotation cell across containers
+        let annotationCell = await scrollAndFindCell(rowIndex, COL_ID_ANNOTATION);
+
+        if (!annotationCell) {
+            console.log(`[opt-ext] Строка ${index}/${total} (row-index=${rowIndex}): ячейка аннотации [col-id="${COL_ID_ANNOTATION}"] не найдена.`);
+            return;
+        }
+
+        const cellVal = annotationCell.querySelector('.ag-cell-value') || annotationCell;
+        const rawAnnotation = cellVal.innerHTML || cellVal.textContent || '';
+        const annotationText = cleanRichContentText(rawAnnotation);
+
+        if (!annotationText) {
+            console.log(`[opt-ext] Строка ${index}/${total} (row-index=${rowIndex}): аннотация пустая. Пропуск.`);
+            return;
+        }
+
+        console.log(`[opt-ext] Строка ${index}/${total} (row-index=${rowIndex}): найдена аннотация (${annotationText.length} символов).`);
+
+        // 3b. Extract Brand from [col-id="attribute#85"]
+        let brandText = '';
+        let brandCell = await scrollAndFindCell(rowIndex, COL_ID_BRAND);
+        if (brandCell) {
+            const brandValEl = brandCell.querySelector('.dn0-o4c') || brandCell.querySelector('.dn0-c1p') || brandCell.querySelector('.ag-cell-value') || brandCell;
+            brandText = (brandValEl.textContent || '').trim();
+        }
+        console.log(`[opt-ext] Строка ${index}/${total}: бренд = "${brandText}"`);
+
+        // 3c. Extract Model from [col-id="attribute#9048"]
+        let modelText = '';
+        let modelCell = await scrollAndFindCell(rowIndex, COL_ID_MODEL);
+        if (modelCell) {
+            const modelValEl = modelCell.querySelector('.dn0-c1p') || modelCell.querySelector('.dn0-o4c') || modelCell.querySelector('.ag-cell-value') || modelCell;
+            let rawModel = (modelValEl.textContent || '').trim();
+            // Remove underscore and everything after it
+            const underscoreIdx = rawModel.indexOf('_');
+            if (underscoreIdx !== -1) {
+                rawModel = rawModel.substring(0, underscoreIdx).trim();
+            }
+            modelText = rawModel;
+        }
+        console.log(`[opt-ext] Строка ${index}/${total}: модель = "${modelText}"`);
+
+        // 3d. Build product title from Brand + Model
+        const productTitle = cleanRichContentText([brandText, modelText].filter(Boolean).join(' ')) || 'Товар';
+
+        // 4. Find Rich-content cell across containers
+        let richCell = await scrollAndFindCell(rowIndex, COL_ID_RICH_CONTENT);
+
+        if (!richCell) {
+            console.error(`[opt-ext] Строка ${index}/${total} (row-index=${rowIndex}): ячейка Rich-контента [col-id="${COL_ID_RICH_CONTENT}"] не найдена.`);
+            return;
+        }
+
+        // Target .ag-cell-value inside Rich-content cell
+        console.log(`[opt-ext] Строка ${index}/${total}: подготовка к двойному клику по ячейке Rich-контента...`);
+        await triggerCellDblClick(richCell);
+
+        // 6. Wait for modal "Добавление Rich-контента"
+        const modalFound = await waitForModalByTitle('Rich-контент', 3000);
+        if (!modalFound) {
+            console.error(`[opt-ext] Строка ${index}/${total}: модалка "Добавление Rich-контента" не появилась за 3 сек. Пропуск.`);
+            return;
+        }
+
+        const modal = findModalByTitle('Rich-контент');
+        if (!modal) {
+            console.error(`[opt-ext] Строка ${index}/${total}: узел модалки не найден.`);
+            return;
+        }
+
+        // 7. Find JSON Textarea inside modal (with async retry loop)
+        const textarea = await waitForRichContentTextarea(modal, 2500);
+        if (!textarea) {
+            console.error(`[opt-ext] Строка ${index}/${total}: textarea для JSON не найдена в модалке за 2.5 сек.`);
+            return;
+        }
+
+        // 8. Build Rich-content JSON payload
+        const jsonPayload = {
+            "content": [
+                {
+                    "widgetName": "raTextBlock",
+                    "title": {
+                        "items": [{ "type": "text", "content": productTitle }],
+                        "size": "size5",
+                        "color": "color1"
+                    },
+                    "theme": "primary",
+                    "padding": "type2",
+                    "gapSize": "m",
+                    "text": {
+                        "size": "size2",
+                        "align": "left",
+                        "color": "color1",
+                        "items": [
+                            { "type": "text", "content": annotationText }
+                        ]
+                    }
+                }
+            ],
+            "version": 0.3
+        };
+
+        const jsonString = JSON.stringify(jsonPayload, null, 2);
+
+        // 9. Inject JSON into textarea via native setter
+        console.log(`[opt-ext] Строка ${index}/${total}: вставка JSON в textarea...`);
+        setNativeValue(textarea, jsonString);
+        await sleep(300);
+
+        // 10. Find and click "Применить" button (with async retry loop)
+        const applyBtn = await waitForModalButton(modal, 'Применить', 2500);
+        if (!applyBtn) {
+            console.error(`[opt-ext] Строка ${index}/${total}: кнопка "Применить" не найдена за 2.5 сек.`);
+            return;
+        }
+
+        console.log(`[opt-ext] Строка ${index}/${total}: нажатие кнопки "Применить"...`);
+        applyBtn.click();
+
+        // 11. Wait for modal close
+        await waitForModalClose(modal, 2500);
+
+        // Check pause or stop immediately after apply and modal close (during the 1 sec pause)
+        if (richFillerPaused || richFillerStopRequested) {
+            console.log(`[opt-ext] Строка ${index}/${total}: сохранена. Проверка статуса паузы/остановки...`);
+        }
+        await checkPauseAndStopState();
+
+        await sleep(1000);
+
+        // Second check after the 1 second pause before proceeding to next row
+        await checkPauseAndStopState();
+
+        console.log(`[opt-ext] Строка ${index}/${total}: успешно обработана.`);
+    }
+
+    async function scrollAndFindCell(rowIndex, colId) {
+        // 1. Try direct query first (cell already in DOM)
+        let cell = findCellInGridRow(rowIndex, colId);
+        if (cell) return cell;
+
+        // 2. Find the horizontal scroll viewport (AG-Grid syncs header + body through this)
+        const hScrollVP = document.querySelector('.ag-body-horizontal-scroll-viewport') ||
+                          document.querySelector('.ag-center-cols-viewport');
+
+        if (!hScrollVP) {
+            console.log(`[opt-ext] scrollAndFindCell: горизонтальный скролл-вьюпорт не найден.`);
+            return null;
+        }
+
+        // 3. Determine target scroll position from header cell's left offset
+        // AG-Grid header cells have style="left: Npx" or transform with translateX
+        const headerCell = document.querySelector(`.ag-header-cell[col-id="${colId}"]`);
+        let targetLeft = -1;
+
+        if (headerCell) {
+            // Try reading 'left' from style
+            const leftStyle = headerCell.style.left;
+            if (leftStyle) {
+                targetLeft = parseInt(leftStyle, 10);
+            }
+            // Fallback: try reading from computed transform  
+            if (targetLeft <= 0) {
+                const transform = window.getComputedStyle(headerCell).transform;
+                if (transform && transform !== 'none') {
+                    const match = transform.match(/matrix.*,\s*([\d.]+)\)/);
+                    if (match) targetLeft = parseFloat(match[1]);
+                }
+            }
+        }
+
+        // 4. If we couldn't find header, search in column definitions or guess from other cells
+        if (targetLeft < 0) {
+            // Try to find any cell with this col-id anywhere in DOM to get its left offset
+            const anyCell = document.querySelector(`[col-id="${colId}"]`);
+            if (anyCell) {
+                const leftStyle = anyCell.style.left;
+                if (leftStyle) targetLeft = parseInt(leftStyle, 10);
+            }
+        }
+
+        if (targetLeft >= 0) {
+            // Center the column in the viewport
+            const vpWidth = hScrollVP.clientWidth;
+            const scrollTarget = Math.max(0, targetLeft - vpWidth / 2 + 100);
+            
+            console.log(`[opt-ext] scrollAndFindCell: скролл к col-id="${colId}" (left=${targetLeft}px, scrollTo=${scrollTarget}px)`);
+            hScrollVP.scrollLeft = scrollTarget;
+            await sleep(300);
+
+            cell = findCellInGridRow(rowIndex, colId);
+            if (cell) return cell;
+
+            // Try exact position
+            hScrollVP.scrollLeft = targetLeft;
+            await sleep(300);
+            cell = findCellInGridRow(rowIndex, colId);
+            if (cell) return cell;
+        }
+
+        // 5. Fallback: sweep scroll through entire grid width to find the column
+        const totalWidth = hScrollVP.scrollWidth;
+        const vpWidth = hScrollVP.clientWidth;
+        const step = vpWidth * 0.7; // overlap 30%
+
+        console.log(`[opt-ext] scrollAndFindCell: начинаю sweep-скролл (totalWidth=${totalWidth}, step=${step}) для col-id="${colId}"...`);
+        
+        for (let pos = 0; pos < totalWidth; pos += step) {
+            hScrollVP.scrollLeft = pos;
+            await sleep(250);
+            cell = findCellInGridRow(rowIndex, colId);
+            if (cell) {
+                console.log(`[opt-ext] scrollAndFindCell: найдена ячейка col-id="${colId}" на scrollLeft=${pos}px`);
+                return cell;
+            }
+        }
+
+        console.log(`[opt-ext] scrollAndFindCell: ячейка [col-id="${colId}"] для row-index=${rowIndex} не найдена после полного sweep-скролла.`);
+        return null;
+    }
+    async function triggerCellDblClick(richCell) {
+        // Scroll cell into center both horizontally and vertically
+        richCell.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+        await sleep(200);
+
+        // Find target inner element or fallback to richCell container
+        const innerTextEl = richCell.querySelector('.dn0-c1p') || richCell.querySelector('[class*="-c1p"]') || richCell.querySelector('.ag-cell-value') || richCell;
+
+        function singleClick(target) {
+            const rect = target.getBoundingClientRect();
+            const opts = {
+                bubbles: true,
+                cancelable: true,
+                view: window,
+                clientX: rect.left + rect.width / 2,
+                clientY: rect.top + rect.height / 2,
+                detail: 1
+            };
+            target.dispatchEvent(new MouseEvent('mousedown', opts));
+            target.dispatchEvent(new MouseEvent('mouseup', opts));
+            target.dispatchEvent(new MouseEvent('click', opts));
+        }
+
+        // Click 1: focus cell (causes ag-cell-focus class)
+        console.log('[opt-ext] Клик 1: фокус на ячейку Rich-контента...');
+        singleClick(innerTextEl);
+        if (typeof richCell.focus === 'function') richCell.focus();
+        if (typeof innerTextEl.focus === 'function') innerTextEl.focus();
+
+        // Wait for AG Grid cell focus state to update
+        await sleep(250);
+
+        // Click 2: click focused cell to open modal
+        console.log('[opt-ext] Клик 2: открытие модалки на сфокусированной ячейке...');
+        singleClick(innerTextEl);
+
+        // Check if modal opens within 600ms
+        const modalOpened = await waitForModalByTitle('Rich-контент', 600);
+        if (!modalOpened) {
+            console.log('[opt-ext] Фолбэк клик 2 по родителю [col-id]...');
+            singleClick(richCell);
+            richCell.click?.();
+        }
+    }
+
+    function findModalByTitle(titleText) {
+        const lowerTarget = titleText.toLowerCase();
+
+        const elements = Array.from(document.querySelectorAll('div, section, dialog, [role="dialog"]'));
+        for (const el of elements) {
+            if (!el.textContent) continue;
+            const txt = el.textContent.toLowerCase();
+            if (txt.includes(lowerTarget) || txt.includes('добавление rich-контента') || txt.includes('rich-контент')) {
+                const style = window.getComputedStyle(el);
+                if ((style.position === 'fixed' || style.position === 'absolute' || el.getAttribute('role') === 'dialog') && style.display !== 'none' && style.visibility !== 'hidden' && el.offsetHeight > 0) {
+                    return el;
+                }
+            }
+        }
+
+        const labels = Array.from(document.querySelectorAll('label'));
+        const jsonLabel = labels.find(l => l.textContent && l.textContent.toLowerCase().includes('rich-контент json'));
+        if (jsonLabel) {
+            let parent = jsonLabel.parentElement;
+            while (parent && parent !== document.body) {
+                const style = window.getComputedStyle(parent);
+                if (style.position === 'fixed' || style.position === 'absolute' || parent.getAttribute('role') === 'dialog') {
+                    return parent;
+                }
+                parent = parent.parentElement;
+            }
+            return jsonLabel.closest('div');
+        }
+
+        return null;
+    }
+
+    function waitForModalByTitle(titleText, timeoutMs) {
+        return new Promise((resolve) => {
+            const start = Date.now();
+            const interval = setInterval(() => {
+                const modal = findModalByTitle(titleText);
+                if (modal) {
+                    clearInterval(interval);
+                    resolve(true);
+                } else if (Date.now() - start > timeoutMs) {
+                    clearInterval(interval);
+                    resolve(false);
+                }
+            }, 100);
+        });
+    }
+
+    function waitForModalClose(modal, timeoutMs) {
+        return new Promise((resolve) => {
+            const start = Date.now();
+            const interval = setInterval(() => {
+                if (!document.body.contains(modal) || window.getComputedStyle(modal).display === 'none') {
+                    clearInterval(interval);
+                    resolve(true);
+                } else if (Date.now() - start > timeoutMs) {
+                    clearInterval(interval);
+                    resolve(false);
+                }
+            }, 100);
+        });
+    }
+
+    function waitForRichContentTextarea(modal, timeoutMs = 2000) {
+        return new Promise((resolve) => {
+            const start = Date.now();
+            const timer = setInterval(() => {
+                const searchRoot = (modal && document.body.contains(modal)) ? modal : document;
+                const labels = Array.from(searchRoot.querySelectorAll('label'));
+                const label = labels.find(l => l.textContent && l.textContent.toLowerCase().includes('rich-контент json'));
+                
+                if (label) {
+                    const htmlFor = label.getAttribute('for');
+                    if (htmlFor) {
+                        const el = document.getElementById(htmlFor);
+                        if (el && el.tagName.toLowerCase() === 'textarea') {
+                            clearInterval(timer);
+                            return resolve(el);
+                        }
+                    }
+                    const parentContainer = label.closest('[class*="ct6134"]') || label.parentElement?.parentElement;
+                    if (parentContainer) {
+                        const ta = parentContainer.querySelector('textarea');
+                        if (ta) {
+                            clearInterval(timer);
+                            return resolve(ta);
+                        }
+                    }
+                }
+
+                if (modal) {
+                    const modalTa = modal.querySelector('textarea');
+                    if (modalTa) {
+                        clearInterval(timer);
+                        return resolve(modalTa);
+                    }
+                }
+
+                const globalTa = document.querySelector('textarea');
+                if (globalTa) {
+                    clearInterval(timer);
+                    return resolve(globalTa);
+                }
+
+                if (Date.now() - start > timeoutMs) {
+                    clearInterval(timer);
+                    resolve(null);
+                }
+            }, 100);
+        });
+    }
+
+    function waitForModalButton(modal, btnText, timeoutMs = 2500) {
+        return new Promise((resolve) => {
+            const start = Date.now();
+            const lowerText = btnText.toLowerCase();
+            const timer = setInterval(() => {
+                if (modal && document.body.contains(modal)) {
+                    const modalBtns = Array.from(modal.querySelectorAll('button'));
+                    const foundInModal = modalBtns.find(b => b.textContent && b.textContent.toLowerCase().includes(lowerText));
+                    if (foundInModal) {
+                        clearInterval(timer);
+                        return resolve(foundInModal);
+                    }
+                }
+
+                const allBtns = Array.from(document.querySelectorAll('button'));
+                const foundGlobal = allBtns.find(b => b.textContent && b.textContent.toLowerCase().includes(lowerText));
+                if (foundGlobal) {
+                    clearInterval(timer);
+                    return resolve(foundGlobal);
+                }
+
+                if (Date.now() - start > timeoutMs) {
+                    clearInterval(timer);
+                    resolve(null);
+                }
+            }, 100);
+        });
+    }
+
+    // =========================================================================
+    // MODULE 3: Questions Assistant (DeepSeek)
+    // =========================================================================
+
+    let questionsObserver = null;
+    let isQuestionsBulkRunning = false;
+    let selectedQuestionRows = new Set();
+    let questionsFloatContainer = null;
+    let questionsSelectionSummary = null;
+    let questionsBulkBtn = null;
+    let lastClickedQuestionData = null;
+
+    function initQuestionsAssistant() {
+        // Toggle panel visibilities for SPA
+        const reviewsFloat = document.getElementById('opt-ext-float-container');
+        if (reviewsFloat) reviewsFloat.style.display = 'none';
+
+        const questionsFloat = document.getElementById('opt-ext-questions-float-container');
+        if (questionsFloat) questionsFloat.style.display = 'flex';
+
+        injectSellerStyles();
+
+        // Ensure reply templates are loaded for questions dropdowns
+        chrome.storage.local.get(['ozonReplyTemplates'], (result) => {
+            if (result.ozonReplyTemplates) {
+                savedTemplates = normalizeReplyTemplates(result.ozonReplyTemplates);
+                updateQuestionsSelectDropdowns();
+            }
+        });
+
+        setupQuestionsObserver();
+        initQuestionsFloatingPanel();
+    }
+
+    function setupQuestionsObserver() {
+        if (questionsObserver) return;
+
+        questionsObserver = new MutationObserver(() => {
+            // 1. Check for open drawer
+            enhanceVisibleQuestionsDrawer();
+
+            // 2. Check for table rows update
+            enhanceQuestionsTableRows();
+        });
+
+        questionsObserver.observe(document.body, {
+            childList: true,
+            subtree: true
+        });
+
+        // Run immediate check
+        enhanceVisibleQuestionsDrawer();
+        enhanceQuestionsTableRows();
+    }
+
+    function findQuestionsDrawer() {
+        // Direct modal/drawer container search on Ozon Seller
+        const paranja = document.querySelector('div[aria-label="Паранжа"], .ct3134-a, .ct3134-a0');
+        if (paranja && paranja.querySelector('textarea')) {
+            return paranja;
+        }
+
+        // Look for drawer/modal container with "Вопрос о товаре" or "Ответ на вопрос"
+        const headings = Array.from(document.querySelectorAll('h1, h2, h3, h4, div, span'));
+        const drawerTitle = headings.find(el => {
+            const txt = el.textContent?.trim();
+            return txt === 'Вопрос о товаре' || (txt && txt.includes('Вопрос о товаре'));
+        });
+
+        if (drawerTitle) {
+            let curr = drawerTitle.parentElement;
+            while (curr && curr !== document.body) {
+                if (curr.querySelector('textarea')) {
+                    return curr;
+                }
+                curr = curr.parentElement;
+            }
+        }
+
+        // Fallback: look for container holding textarea with placeholder "Ваш ответ" or "Ответ на вопрос"
+        const textarea = document.querySelector('textarea[placeholder*="ответ" i], textarea[id*="baseInput"]');
+        if (textarea) {
+            const modal = textarea.closest('div[aria-label="Паранжа"], .ct3134-a, .ct3134-a0, div[role="dialog"], aside');
+            if (modal) return modal;
+            let curr = textarea.parentElement;
+            while (curr && curr !== document.body) {
+                if (curr.textContent.includes('Вопрос о товаре') || curr.textContent.includes('Общая информация')) {
+                    return curr;
+                }
+                curr = curr.parentElement;
+            }
+            return textarea.parentElement;
+        }
+
+        return null;
+    }
+
+    function extractDrawerContext(drawer) {
+        let product = '';
+        let brand = '';
+        let sku = '';
+        let buyer = '';
+        let question = '';
+        let article = '';
+
+        // 1. Direct row parsing by .n1d-ga8 / field label
+        const rows = Array.from(drawer.querySelectorAll('.n1d-ga8, [class*="n1d-ga8"]'));
+        rows.forEach(r => {
+            const labelEl = r.firstElementChild;
+            const labelText = labelEl?.textContent?.trim() || '';
+
+            if (/^Бренд$/i.test(labelText)) {
+                brand = labelEl.nextElementSibling?.textContent?.trim() || brand;
+            } else if (/^Артикул$/i.test(labelText)) {
+                article = labelEl.nextElementSibling?.textContent?.trim() || article;
+            } else if (/^Покупатель$/i.test(labelText)) {
+                buyer = labelEl.nextElementSibling?.textContent?.trim() || buyer;
+            } else if (/^Вопрос$/i.test(labelText)) {
+                const qContent = r.querySelector('.n1d-ha, [class*="n1d-ha"]') || labelEl.nextElementSibling;
+                if (qContent) {
+                    question = qContent.textContent?.trim() || question;
+                }
+            } else if (/^Товар$/i.test(labelText)) {
+                const prodLink = r.querySelector('a[href*="/product/"]');
+                if (prodLink) {
+                    const mbTitle = prodLink.querySelector('.mb1, [class*="mb1"]');
+                    product = mbTitle?.textContent?.trim() || prodLink.textContent?.trim() || product;
+                    const skuMatch = prodLink.href.match(/product\/.*?-(\d+)\/?/) || prodLink.href.match(/(\d{8,12})/);
+                    if (skuMatch) sku = skuMatch[1];
+                }
+            }
+        });
+
+        // 2. Fallback search across all drawer elements
+        if (!question || !product || !brand || !article || !buyer) {
+            const allElements = Array.from(drawer.querySelectorAll('*'));
+
+            function getValueAfterLabel(labelRegex) {
+                for (let i = 0; i < allElements.length; i++) {
+                    const el = allElements[i];
+                    if (el.children.length === 0 && labelRegex.test(el.textContent?.trim() || '')) {
+                        let next = el.nextElementSibling;
+                        if (next && next.textContent.trim()) return next.textContent.trim();
+                        let pNext = el.parentElement?.nextElementSibling;
+                        if (pNext && pNext.textContent.trim()) return pNext.textContent.trim();
+                        if (el.parentElement && el.parentElement.children.length >= 2) {
+                            return el.parentElement.children[1].textContent.trim();
+                        }
+                    }
+                }
+                return '';
+            }
+
+            if (!brand) brand = getValueAfterLabel(/^Бренд$/i);
+            if (!article) article = getValueAfterLabel(/^Артикул$/i);
+            if (!buyer) buyer = getValueAfterLabel(/^Покупатель$/i);
+            if (!question) {
+                const qBlock = drawer.querySelector('.n1d-ha, [class*="n1d-ha"]');
+                question = qBlock?.textContent?.trim() || getValueAfterLabel(/^Вопрос$/i);
+            }
+            if (!product) {
+                const productLink = drawer.querySelector('a[href*="/product/"]');
+                if (productLink) {
+                    const mbTitle = productLink.querySelector('.mb1, [class*="mb1"]');
+                    product = mbTitle?.textContent?.trim() || productLink.textContent?.trim() || '';
+                    const skuMatch = productLink.href.match(/product\/.*?-(\d+)\/?/) || productLink.href.match(/(\d{8,12})/);
+                    if (skuMatch) sku = skuMatch[1];
+                }
+            }
+        }
+
+        // Clean product title if SKU was attached at the end
+        if (product && sku && product.endsWith(sku)) {
+            product = product.slice(0, -sku.length).trim();
+        }
+
+        // Check for SKU in number element if still not found
+        if (!sku) {
+            const numEl = Array.from(drawer.querySelectorAll('div, span')).find(d => /^\d{8,12}$/.test(d.textContent?.trim()));
+            if (numEl) sku = numEl.textContent.trim();
+        }
+
+        // Fallback to last clicked row data if some fields are missing
+        if (lastClickedQuestionData) {
+            if (!product && lastClickedQuestionData.product) product = lastClickedQuestionData.product;
+            if (!sku && lastClickedQuestionData.sku) sku = lastClickedQuestionData.sku;
+            if (!question && lastClickedQuestionData.question) question = lastClickedQuestionData.question;
+            if (!brand && lastClickedQuestionData.seller) brand = lastClickedQuestionData.seller;
+        }
+
+        return { product, brand, sku, buyer, question, article };
+    }
+
+    function enhanceVisibleQuestionsDrawer() {
+        const drawer = findQuestionsDrawer();
+        if (!drawer) return;
+
+        if (drawer.querySelector('.opt-ext-ai-drawer-card')) return;
+
+        const textarea = drawer.querySelector('textarea');
+        if (!textarea) return;
+
+        // Build AI Assistant Drawer Card
+        const card = document.createElement('div');
+        card.className = 'opt-ext-ai-drawer-card';
+
+        // Header
+        const header = document.createElement('div');
+        header.className = 'opt-ext-ai-header';
+
+        const titleWrap = document.createElement('div');
+        titleWrap.className = 'opt-ext-ai-title-wrap';
+
+        const title = document.createElement('span');
+        title.className = 'opt-ext-ai-title';
+        title.textContent = '✨ DeepSeek AI';
+
+        const badge = document.createElement('span');
+        badge.className = 'opt-ext-ai-badge';
+        badge.textContent = 'V3';
+
+        titleWrap.append(createBrandMark('opt-ext-ai-brand-mark'), title, badge);
+
+        const balanceChip = document.createElement('span');
+        balanceChip.className = 'opt-ext-ai-balance-chip';
+        balanceChip.textContent = 'Баланс...';
+
+        // Read configured model and cached balance
+        chrome.storage.local.get(['deepseekModel', 'deepseekLastBalance'], (res) => {
+            const m = (res.deepseekModel || 'deepseek-flash').toLowerCase();
+            let label = 'V4.1 FLASH';
+            if (m === 'deepseek-flash') label = 'V4.1 FLASH';
+            else if (m === 'deepseek-v4-pro') label = 'V4 PRO';
+            else if (m.includes('reasoner') || m.includes('r1')) label = 'V4.1 THINK';
+            else if (m.includes('v4')) label = 'V4';
+            else if (m.includes('coder')) label = 'CODER';
+            else if (m.includes('v2')) label = 'V2.5';
+            else if (m.startsWith('deepseek-')) label = m.replace('deepseek-', '').toUpperCase();
+            else label = m.toUpperCase().slice(0, 8);
+            badge.textContent = label;
+
+            if (res.deepseekLastBalance?.balance_infos?.[0]) {
+                const info = res.deepseekLastBalance.balance_infos[0];
+                const symbol = info.currency === 'CNY' ? '¥' : '$';
+                const bal = parseFloat(info.total_balance || '0').toFixed(2);
+                balanceChip.textContent = `${symbol} ${bal}`;
+            } else {
+                balanceChip.textContent = 'AI готов';
+            }
+        });
+
+        header.append(titleWrap, balanceChip);
+
+        // Buttons row
+        const btnRow = document.createElement('div');
+        btnRow.className = 'opt-ext-ai-btn-row';
+
+        const genBtn = document.createElement('button');
+        genBtn.type = 'button';
+        genBtn.className = 'opt-ext-ai-btn opt-ext-ai-gen-btn';
+        genBtn.innerHTML = '✨ Сгенерировать ответ';
+
+        const genSendBtn = document.createElement('button');
+        genSendBtn.type = 'button';
+        genSendBtn.className = 'opt-ext-ai-btn opt-ext-ai-gensend-btn';
+        genSendBtn.innerHTML = '🚀 Сгенерировать и отправить';
+
+        btnRow.append(genBtn, genSendBtn);
+
+        // Status bar
+        const statusEl = document.createElement('div');
+        statusEl.className = 'opt-ext-ai-status';
+        statusEl.textContent = 'Нажмите кнопку для генерации ответа';
+
+        card.append(header, btnRow, statusEl);
+
+        // Action handler for AI generation
+        async function runAiGeneration(autoSendAfter) {
+            const context = extractDrawerContext(drawer);
+
+            if (!context.question) {
+                statusEl.className = 'opt-ext-ai-status error';
+                statusEl.textContent = '⚠️ Не удалось найти текст вопроса в окне';
+                return;
+            }
+
+            genBtn.disabled = true;
+            genSendBtn.disabled = true;
+            statusEl.className = 'opt-ext-ai-status';
+            statusEl.innerHTML = '<span class="opt-ext-ai-spinner"></span> Анализирую товар и формулирую ответ...';
+
+            chrome.runtime.sendMessage({
+                action: 'deepseek_generate_answer',
+                data: context
+            }, async (response) => {
+                genBtn.disabled = false;
+                genSendBtn.disabled = false;
+
+                if (!response || !response.success) {
+                    const errMsg = response?.error || 'Неизвестная ошибка генерации';
+                    statusEl.className = 'opt-ext-ai-status error';
+                    statusEl.textContent = `⚠️ ${errMsg}`;
+                    return;
+                }
+
+                // Insert into textarea
+                setNativeValue(textarea, response.answer);
+                textarea.dispatchEvent(new Event('input', { bubbles: true }));
+                textarea.dispatchEvent(new Event('change', { bubbles: true }));
+                textarea.dispatchEvent(new Event('blur', { bubbles: true }));
+
+                const tokens = response.usage?.total_tokens || '—';
+                statusEl.className = 'opt-ext-ai-status success';
+                statusEl.textContent = `✓ Ответ готов (${tokens} токенов)`;
+
+                // Update balance chip if stats returned
+                if (response.stats) {
+                    chrome.storage.local.get(['deepseekLastBalance'], (bRes) => {
+                        if (bRes.deepseekLastBalance?.balance_infos?.[0]) {
+                            const info = bRes.deepseekLastBalance.balance_infos[0];
+                            const symbol = info.currency === 'CNY' ? '¥' : '$';
+                            const bal = parseFloat(info.total_balance || '0').toFixed(2);
+                            balanceChip.textContent = `${symbol} ${bal}`;
+                        }
+                    });
+                }
+
+                // Auto-send ONLY if explicitly requested by clicking "Сгенерировать и отправить"
+                if (autoSendAfter === true) {
+                    statusEl.textContent = '✓ Ответ вставлен, отправляю...';
+                    await sleep(400);
+
+                    const submitBtn = findDrawerSubmitButton(drawer);
+                    if (submitBtn) {
+                        submitBtn.click();
+                        statusEl.textContent = '✓ Ответ отправлен покупателю!';
+                    } else {
+                        statusEl.textContent = '✓ Ответ вставлен (нажмите «Отправить ответ»)';
+                    }
+                } else {
+                    statusEl.textContent = '✓ Ответ вставлен в поле ввода. Проверьте и отправьте.';
+                }
+            });
+        }
+
+        genBtn.addEventListener('click', () => runAiGeneration(false));
+        genSendBtn.addEventListener('click', () => runAiGeneration(true));
+
+        // Insert card directly above textarea wrapper (.ct6135-a0 / .mb4) inside .mt7
+        const inputWrapper = textarea.closest('.ct6135-a0, .mb4') || textarea.closest('.ct6135-a1') || textarea.parentElement;
+        if (inputWrapper && inputWrapper.parentElement) {
+            inputWrapper.parentElement.insertBefore(card, inputWrapper);
+        } else {
+            textarea.parentElement.insertBefore(card, textarea);
+        }
+    }
+
+    function findDrawerSubmitButton(drawer) {
+        const submitBtn = drawer.querySelector('button[type="submit"], button.c9r134-a');
+        if (submitBtn && submitBtn.textContent.toLowerCase().includes('отправить')) {
+            return submitBtn;
+        }
+        const buttons = Array.from(drawer.querySelectorAll('button'));
+        return buttons.find(b => {
+            const txt = b.textContent?.trim().toLowerCase();
+            return txt.includes('отправить') || b.type === 'submit';
+        });
+    }
+
+    function findDrawerCloseButton(drawer) {
+        const directClose = drawer.querySelector('button[aria-label*="закрыт" i], button[aria-label*="Крестик" i], .ct3134-a1, button[class*="ct3134-a1"]');
+        if (directClose) return directClose;
+        const closeIcon = drawer.querySelector('svg[data-testid="InformerCloseIcon"], svg[class*="close"]');
+        if (closeIcon) return closeIcon.closest('button') || closeIcon;
+        const allBtns = Array.from(drawer.querySelectorAll('button'));
+        return allBtns.find(b => b.querySelector('svg') && !b.textContent.trim());
+    }
+
+    // =========================================================================
+    // Table Rows Enhancement & Batch Answering
+    // =========================================================================
+
+    function isQuestionRowAnswered(tr) {
+        const cells = Array.from(tr.querySelectorAll('td'));
+        // If our checkbox td is already inserted, answers count is at index 5.
+        // If not yet inserted, answers count is at index 4.
+        const targetIndex = tr.querySelector('.opt-ext-question-td') ? 5 : 4;
+        if (cells.length > targetIndex) {
+            const num = parseInt(cells[targetIndex].textContent?.trim(), 10);
+            return !isNaN(num) && num > 0;
+        }
+        return false;
+    }
+
+    function populateQuestionsBulkSelect(select) {
+        if (!select) return;
+        const currentVal = select.value;
+        select.innerHTML = '';
+
+        const defaultOpt = document.createElement('option');
+        defaultOpt.value = '';
+        defaultOpt.textContent = 'Применить...';
+        select.appendChild(defaultOpt);
+
+        const aiOpt = document.createElement('option');
+        aiOpt.value = 'deepseek_ai';
+        aiOpt.textContent = '✨ DeepSeek AI';
+        select.appendChild(aiOpt);
+
+        const templates = savedTemplates.filter(t => t.id !== '__default_all_selected_reviews__');
+        if (templates.length > 0) {
+            const grp = document.createElement('optgroup');
+            grp.label = 'Шаблоны ответов';
+            templates.forEach(tpl => {
+                const opt = document.createElement('option');
+                opt.value = tpl.id;
+                opt.textContent = tpl.title;
+                grp.appendChild(opt);
+            });
+            select.appendChild(grp);
+        }
+
+        select.value = currentVal || '';
+    }
+
+    function populateQuestionsRowSelect(select) {
+        if (!select) return;
+        const currentVal = select.value;
+        select.innerHTML = '';
+
+        const aiOpt = document.createElement('option');
+        aiOpt.value = 'deepseek_ai';
+        aiOpt.textContent = '✨ DeepSeek AI';
+        select.appendChild(aiOpt);
+
+        const templates = savedTemplates.filter(t => t.id !== '__default_all_selected_reviews__');
+        if (templates.length > 0) {
+            const grp = document.createElement('optgroup');
+            grp.label = 'Шаблоны ответов';
+            templates.forEach(tpl => {
+                const opt = document.createElement('option');
+                opt.value = tpl.id;
+                opt.textContent = tpl.title;
+                grp.appendChild(opt);
+            });
+            select.appendChild(grp);
+        }
+
+        if (currentVal && Array.from(select.options).some(o => o.value === currentVal)) {
+            select.value = currentVal;
+        } else {
+            select.value = 'deepseek_ai';
+        }
+    }
+
+    function updateQuestionsSelectDropdowns() {
+        const bulkSelect = document.querySelector('.opt-ext-question-bulk-select');
+        if (bulkSelect) populateQuestionsBulkSelect(bulkSelect);
+
+        const rowSelects = document.querySelectorAll('.opt-ext-question-row-select');
+        rowSelects.forEach(sel => populateQuestionsRowSelect(sel));
+    }
+
+    function enhanceQuestionsTableRows() {
+        const table = document.querySelector('table.ct5140-a, table');
+        if (!table) return;
+
+        // Enhance header if not yet enhanced (or upgrade if missing bulk select)
+        const theadRow = table.querySelector('thead tr');
+        if (theadRow) {
+            let th = theadRow.querySelector('.opt-ext-question-th');
+            if (th && !th.querySelector('.opt-ext-question-bulk-select')) {
+                th.remove();
+                th = null;
+            }
+
+            if (!th) {
+                th = document.createElement('th');
+                th.className = 'opt-ext-question-th';
+
+                const thInner = document.createElement('div');
+                thInner.className = 'opt-ext-question-th-inner';
+
+                const checkAllCb = document.createElement('input');
+                checkAllCb.type = 'checkbox';
+                checkAllCb.className = 'opt-ext-question-cb';
+                checkAllCb.title = 'Выбрать все неотвеченные вопросы на странице';
+                checkAllCb.addEventListener('change', (e) => {
+                    const checked = e.target.checked;
+                    const rowCbs = table.querySelectorAll('tbody .opt-ext-question-cb:not(:disabled)');
+                    selectedQuestionRows.clear();
+                    rowCbs.forEach(cb => {
+                        cb.checked = checked;
+                        const tr = cb.closest('tr');
+                        if (checked && tr) selectedQuestionRows.add(tr);
+                    });
+                    updateQuestionsSelectionSummary();
+                });
+
+                const bulkSelect = document.createElement('select');
+                bulkSelect.className = 'opt-ext-question-select opt-ext-question-bulk-select';
+                bulkSelect.title = 'Массово выбрать действие для всех отмеченных вопросов';
+                populateQuestionsBulkSelect(bulkSelect);
+
+                bulkSelect.addEventListener('change', (e) => {
+                    const val = e.target.value;
+                    if (!val) return;
+                    const checkedRows = Array.from(selectedQuestionRows);
+                    if (checkedRows.length === 0) {
+                        alert('Сначала отметьте вопросы чекбоксом');
+                        e.target.value = '';
+                        return;
+                    }
+                    checkedRows.forEach(tr => {
+                        const rowSel = tr.querySelector('.opt-ext-question-row-select');
+                        if (rowSel) {
+                            rowSel.value = val;
+                        }
+                    });
+                    e.target.value = '';
+                });
+
+                thInner.append(checkAllCb, bulkSelect);
+                th.appendChild(thInner);
+                theadRow.insertBefore(th, theadRow.firstChild);
+            }
+        }
+
+        // Enhance body rows
+        const rows = Array.from(table.querySelectorAll('tbody tr'));
+        rows.forEach(tr => {
+            let td = tr.querySelector('.opt-ext-question-td');
+            if (td && !td.querySelector('.opt-ext-question-row-select') && !td.querySelector('.opt-ext-replied-span')) {
+                td.remove();
+                td = null;
+            }
+
+            if (!td) {
+                td = document.createElement('td');
+                td.className = 'opt-ext-question-td';
+
+                const tdInner = document.createElement('div');
+                tdInner.className = 'opt-ext-question-td-inner';
+
+                const cb = document.createElement('input');
+                cb.type = 'checkbox';
+                cb.className = 'opt-ext-question-cb';
+
+                const alreadyAnswered = isQuestionRowAnswered(tr);
+                if (alreadyAnswered) {
+                    cb.disabled = true;
+                    cb.title = 'На этот вопрос уже дан ответ';
+                    cb.style.opacity = '0.35';
+                    cb.style.cursor = 'not-allowed';
+
+                    const repliedSpan = document.createElement('span');
+                    repliedSpan.className = 'opt-ext-replied-span';
+                    repliedSpan.textContent = 'Уже отвечено';
+                    repliedSpan.style.cssText = 'color: #94a3b8; font-size: 11px; font-style: italic; white-space: nowrap;';
+
+                    tdInner.append(cb, repliedSpan);
+                } else {
+                    const rowSelect = document.createElement('select');
+                    rowSelect.className = 'opt-ext-question-select opt-ext-question-row-select';
+                    rowSelect.title = 'Способ ответа (DeepSeek AI или готовый шаблон)';
+                    populateQuestionsRowSelect(rowSelect);
+
+                    cb.addEventListener('change', () => {
+                        if (cb.checked) {
+                            selectedQuestionRows.add(tr);
+                        } else {
+                            selectedQuestionRows.delete(tr);
+                        }
+                        updateQuestionsSelectionSummary();
+                    });
+
+                    tdInner.append(cb, rowSelect);
+                }
+
+                td.appendChild(tdInner);
+                tr.insertBefore(td, tr.firstChild);
+            }
+
+            // Track question click from row
+            const questionBtn = tr.querySelector('button');
+            if (questionBtn && !questionBtn.__optExtClickBound) {
+                questionBtn.__optExtClickBound = true;
+                questionBtn.addEventListener('click', () => {
+                    // Cache row details
+                    const productLink = tr.querySelector('a[href*="/product/"]');
+                    const skuEl = tr.querySelector('div[class*="c7r134"]');
+                    lastClickedQuestionData = {
+                        product: productLink?.textContent?.trim() || '',
+                        sku: skuEl?.textContent?.trim() || '',
+                        question: questionBtn.textContent?.trim() || '',
+                        seller: tr.querySelectorAll('td')[2]?.textContent?.trim() || ''
+                    };
+                });
+            }
+        });
+    }
+
+    function initQuestionsFloatingPanel() {
+        if (document.getElementById('opt-ext-questions-float-container')) return;
+
+        questionsFloatContainer = document.createElement('div');
+        questionsFloatContainer.id = 'opt-ext-questions-float-container';
+
+        const header = document.createElement('div');
+        header.className = 'opt-ext-panel-header';
+
+        const title = document.createElement('div');
+        title.className = 'opt-ext-panel-title';
+        title.textContent = 'AI Ответы на вопросы';
+
+        const badge = document.createElement('span');
+        badge.className = 'opt-ext-panel-badge';
+        badge.textContent = 'DEEPSEEK';
+
+        const titleWrap = document.createElement('div');
+        titleWrap.className = 'opt-ext-panel-title-wrap';
+        titleWrap.append(createBrandMark(), title);
+
+        header.append(titleWrap, badge);
+
+        questionsSelectionSummary = document.createElement('div');
+        questionsSelectionSummary.id = 'opt-ext-questions-summary';
+        questionsSelectionSummary.style.fontSize = '11px';
+        questionsSelectionSummary.style.color = '#64748b';
+        questionsSelectionSummary.textContent = 'Выбрано вопросов: 0';
+
+        questionsBulkBtn = document.createElement('button');
+        questionsBulkBtn.id = 'opt-ext-questions-submit-btn';
+        questionsBulkBtn.className = 'opt-ext-ai-btn opt-ext-ai-gen-btn';
+        questionsBulkBtn.style.width = '100%';
+        questionsBulkBtn.textContent = 'Ответить на выбранные (0)';
+        questionsBulkBtn.disabled = true;
+
+        questionsBulkBtn.addEventListener('click', startBatchQuestionsAnswering);
+
+        questionsFloatContainer.append(header, questionsSelectionSummary, questionsBulkBtn);
+        document.body.appendChild(questionsFloatContainer);
+        makeFloatingPanelDraggable(questionsFloatContainer, header, 'optExtQuestionsPanelPosition');
+    }
+
+    function updateQuestionsSelectionSummary() {
+        const count = selectedQuestionRows.size;
+        if (questionsSelectionSummary) {
+            questionsSelectionSummary.textContent = `Выбрано вопросов: ${count}`;
+        }
+        if (questionsBulkBtn) {
+            questionsBulkBtn.disabled = count === 0 || isQuestionsBulkRunning;
+            questionsBulkBtn.textContent = `Ответить на выбранные (${count})`;
+        }
+    }
+
+    async function startBatchQuestionsAnswering() {
+        if (isQuestionsBulkRunning || selectedQuestionRows.size === 0) return;
+
+        isQuestionsBulkRunning = true;
+        questionsBulkBtn.disabled = true;
+
+        const rowsArray = Array.from(selectedQuestionRows);
+        const total = rowsArray.length;
+        let processed = 0;
+        let unknownCount = 0;
+        let failureCount = 0;
+        const runToken = questionsRunToken;
+
+        logActivity({
+            action: 'seller_questions_reply',
+            status: 'started',
+            title: 'Ozon Seller: ответы на вопросы запущены',
+            message: `Вопросов в очереди: ${total}.`,
+            platform: 'ozon'
+        });
+
+        const settings = await new Promise(res => chrome.storage.local.get({ deepseekDelay: 3 }, res));
+        const delayMs = (settings.deepseekDelay || 3) * 1000;
+
+        for (let i = 0; i < rowsArray.length; i++) {
+            if (runToken !== questionsRunToken || !isQuestionsBulkRunning) break;
+
+            const tr = rowsArray[i];
+            if (isQuestionRowAnswered(tr)) {
+                selectedQuestionRows.delete(tr);
+                continue;
+            }
+
+            processed++;
+            questionsSelectionSummary.textContent = `Обработка ${processed} из ${total}...`;
+
+            try {
+                // Find question button in row
+                const questionBtn = tr.querySelector('button');
+                if (!questionBtn) {
+                    failureCount++;
+                    continue;
+                }
+
+                // Determine answer mode from row select
+                const rowSelect = tr.querySelector('.opt-ext-question-row-select');
+                const mode = rowSelect ? rowSelect.value : 'deepseek_ai';
+
+                // Cache row context
+                const productLink = tr.querySelector('a[href*="/product/"]');
+                const skuEl = tr.querySelector('div[class*="c7r134"]');
+                lastClickedQuestionData = {
+                    product: productLink?.textContent?.trim() || '',
+                    sku: skuEl?.textContent?.trim() || '',
+                    question: questionBtn.textContent?.trim() || '',
+                    seller: tr.querySelectorAll('td')[2]?.textContent?.trim() || ''
+                };
+
+                // 1. Open drawer
+                questionBtn.click();
+
+                // 2. Wait for drawer to appear
+                let drawer = null;
+                for (let attempt = 0; attempt < 20; attempt++) {
+                    await sleep(250);
+                    drawer = findQuestionsDrawer();
+                    if (drawer && drawer.querySelector('textarea')) break;
+                }
+
+                if (!drawer) {
+                    failureCount++;
+                    continue;
+                }
+
+                const textarea = drawer.querySelector('textarea');
+                if (!textarea) {
+                    failureCount++;
+                    continue;
+                }
+
+                let answerText = '';
+
+                if (mode === 'deepseek_ai') {
+                    // Extract context and generate with DeepSeek
+                    const context = extractDrawerContext(drawer);
+                    const res = await new Promise((resolve) => {
+                        chrome.runtime.sendMessage({
+                            action: 'deepseek_generate_answer',
+                            data: context
+                        }, resolve);
+                    });
+
+                    if (res && res.success && res.answer) {
+                        answerText = res.answer;
+                    } else {
+                        console.error('[opt-ext] Ошибка генерации DeepSeek:', res?.error);
+                        failureCount++;
+                    }
+                } else {
+                    // Template mode
+                    const tpl = savedTemplates.find(t => t.id === mode);
+                    if (tpl && tpl.text) {
+                        answerText = tpl.text;
+                    } else {
+                        console.error('[opt-ext] Шаблон не найден:', mode);
+                        failureCount++;
+                    }
+                }
+
+                if (answerText) {
+                    // 3. Fill textarea
+                    setNativeValue(textarea, answerText);
+                    textarea.dispatchEvent(new Event('input', { bubbles: true }));
+                    textarea.dispatchEvent(new Event('change', { bubbles: true }));
+                    textarea.dispatchEvent(new Event('blur', { bubbles: true }));
+
+                    await sleep(350);
+
+                    // 4. Submit answer
+                    const submitBtn = findDrawerSubmitButton(drawer);
+                    if (submitBtn) {
+                        submitBtn.click();
+                        // A click is only an attempt. Ozon does not expose a stable
+                        // acknowledgement contract here, so the result stays unknown.
+                        unknownCount++;
+                    } else {
+                        failureCount++;
+                    }
+
+                    await sleep(500);
+
+                    // 5. Close drawer
+                    const closeBtn = findDrawerCloseButton(drawer);
+                    if (closeBtn) closeBtn.click();
+
+                    // Uncheck row
+                    if (submitBtn) {
+                        const cb = tr.querySelector('.opt-ext-question-cb');
+                        if (cb) cb.checked = false;
+                        selectedQuestionRows.delete(tr);
+                    }
+                } else {
+                    // Close drawer if generation failed
+                    const closeBtn = findDrawerCloseButton(drawer);
+                    if (closeBtn) closeBtn.click();
+                }
+            } catch (err) {
+                console.error('[opt-ext] Ошибка обработки вопроса в строке:', err);
+                failureCount++;
+            }
+
+            // Pause between questions
+            if (i < rowsArray.length - 1) {
+                await sleep(delayMs);
+            }
+        }
+
+        if (runToken !== questionsRunToken) return;
+        isQuestionsBulkRunning = false;
+        questionsSelectionSummary.textContent = `Готово! Подтверждено сайтом: 0 · неизвестный исход: ${unknownCount} · ошибок: ${failureCount}`;
+        updateQuestionsSelectionSummary();
+        logActivity({
+            action: 'seller_questions_reply',
+            status: failureCount ? 'partial' : 'completed',
+            title: `Ozon Seller: ответы на вопросы ${failureCount ? 'завершены частично' : 'завершены'}`,
+            message: `Обработано: ${processed} из ${total}; неизвестный исход: ${unknownCount}; ошибок: ${failureCount}.`,
+            platform: 'ozon'
+        });
+    }
+
+    // =========================================================================
+    // Router & SPA URL Observer
+    // =========================================================================
+
+    let activeSellerRoute = null;
+    let questionsRunToken = 0;
+
+    function cleanupSellerRoute() {
+        isRunning = false;
+        isQuestionsBulkRunning = false;
+        questionsRunToken += 1;
+        richFillerRunning = false;
+        richFillerStopRequested = true;
+
+        observer?.disconnect();
+        observer = null;
+        questionsObserver?.disconnect();
+        questionsObserver = null;
+        richRepositionObserver?.disconnect();
+        richRepositionObserver = null;
+
+        [
+            'opt-ext-float-container',
+            'opt-ext-checkbox-overlay',
+            'opt-ext-questions-float-container',
+            'opt-ext-rich-filler-container'
+        ].forEach((id) => document.getElementById(id)?.remove());
+
+        rowStates.clear();
+        overlayElements.clear();
+        selectedQuestionRows.clear();
+        floatBtnContainer = null;
+        overlayContainer = null;
+        checkAllWrapper = null;
+        bulkSelectWrapper = null;
+        selectionSummary = null;
+        floatBtn = null;
+        questionsFloatContainer = null;
+        questionsSelectionSummary = null;
+        questionsBulkBtn = null;
+        richFillerContainer = null;
+        richFillerControlsRow = null;
+        richFillerBtn = null;
+        richFillerPauseBtn = null;
+        richFillerStopBtn = null;
+        richFillerProgress = null;
+    }
+
+    function getSellerRouteKey(href) {
+        if (href.includes('/app/products/edit/') || href.includes('behavior=bulk_extended') || href.includes('/products/edit/')) {
+            return 'rich-content';
+        }
+        if (href.includes('/app/reviews/questions') || href.includes('questions')) {
+            return 'questions';
+        }
+        if (href.includes('/app/reviews')) return 'reviews';
+        return 'other';
+    }
+
+    function routePage() {
+        const route = getSellerRouteKey(window.location.href);
+        if (route === activeSellerRoute) return;
+
+        cleanupSellerRoute();
+        activeSellerRoute = route;
+
+        if (route === 'rich-content') initRichContentBulkFiller();
+        else if (route === 'questions') initQuestionsAssistant();
+        else if (route === 'reviews') initReviewsAutoReply();
+    }
+
+    sellerLifecycle.createRouteWatcher({
+        routeForUrl: getSellerRouteKey,
+        onRouteChange: routePage
+    }).start();
+
+})();

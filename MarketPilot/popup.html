@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>MarketPilot</title>
+    <link rel="icon" href="assets/marketpilot-mark.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+    <header class="popup-brand" aria-label="MarketPilot">
+        <img src="assets/marketpilot-mark.svg" alt="" aria-hidden="true">
+        <span>MarketPilot</span>
+    </header>
+    <div class="tabs">
+        <button class="tab-btn active" data-tab="tracking-tab">Ozon</button>
+        <button class="tab-btn" data-tab="wb-tab">Wildberries</button>
+        <button class="tab-btn" data-tab="citilink-tab">Citilink</button>
+        <button class="tab-btn" data-tab="reviews-tab">Ответы</button>
+        <button class="tab-btn" data-tab="ai-questions-tab">Вопросы AI</button>
+        <button class="tab-btn" data-tab="history-tab">История</button>
+    </div>
+
+    <div class="container tab-content active" id="tracking-tab">
+        <h2>Мониторинг цен Ozon</h2>
+        
+        <div class="form-group">
+            <input type="url" id="productUrl" placeholder="https://www.ozon.ru/product/..." required>
+        </div>
+        
+        <div class="form-group">
+            <input type="number" id="targetPrice" placeholder="Целевая цена в рублях" min="1" required>
+        </div>
+        
+        <div class="radio-group">
+            <label>
+                <input type="radio" name="priceType" value="bank" checked>
+                С Ozon Банком
+            </label>
+            <label>
+                <input type="radio" name="priceType" value="nobank">
+                Без Ozon Банка
+            </label>
+        </div>
+        
+        <button id="addBtn">Добавить отслеживание</button>
+        <div id="statusMessage" class="status-hidden"></div>
+
+        <div class="settings-group" style="margin-top: 15px; padding-top: 10px; border-top: 1px solid #eee;">
+            <label for="checkInterval" style="font-size: 13px; color: #555; display:block; margin-bottom: 5px;">Интервал проверки (минут):</label>
+            <div style="display: flex; gap: 8px;">
+                <input type="number" id="checkInterval" min="1" value="120" style="width: 80px; box-sizing: border-box;">
+                <button id="saveIntervalBtn" style="padding: 8px 10px; font-size: 13px; flex-grow: 1;">Сохранить интервал</button>
+            </div>
+        </div>
+
+        <div class="tracked-items-header">
+            <h3>Отслеживаемые товары</h3>
+        </div>
+        <div id="trackedItemsList">
+            <!-- Items will be injected here by popup.js -->
+        </div>
+
+        <div class="footer">
+            <span id="lastCheckTime">Последняя проверка: никогда</span>
+        </div>
+    </div>
+
+    <div class="container tab-content" id="wb-tab">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+            <h2 class="wb-brand-color" style="margin: 0;">Wildberries</h2>
+            <div style="display: flex; gap: 5px;">
+                <button id="wbExportBtn" class="wb-btn" style="padding: 5px 10px; font-size: 11px;">Excel</button>
+                <button id="wbClearBtn" style="padding: 5px 10px; font-size: 11px; background-color: #6c757d;">Очистить</button>
+            </div>
+        </div>
+        
+        <div class="form-group">
+            <textarea id="wbArticles" placeholder="Артикулы WB (каждый с новой строки)
+Пример:
+252678196
+12345678" rows="6"></textarea>
+        </div>
+        
+        <button id="wbStartBtn" class="wb-btn">Старт</button>
+
+        <div id="wbProgressContainer" style="display: none; margin-top: 15px;">
+            <div style="display: flex; justify-content: space-between; font-size: 11px; margin-bottom: 4px;">
+                <span id="wbProgressText">Обработано: 0 из 0</span>
+                <span id="wbProgressPercent">0%</span>
+            </div>
+            <div style="width: 100%; height: 8px; background: #eee; border-radius: 4px; overflow: hidden;">
+                <div id="wbProgressBar" style="width: 0%; height: 100%; background: #CB11AB; transition: width 0.3s;"></div>
+            </div>
+        </div>
+
+        <div class="wb-table-header">
+            <span class="wb-col-article">Артикул</span>
+            <span class="wb-col-price">С кошельком</span>
+            <span class="wb-col-price">Без кошелька</span>
+        </div>
+        <div id="wbTrackedItemsList">
+            <!-- WB results will be injected here -->
+        </div>
+    </div>
+
+    <div class="container tab-content" id="citilink-tab">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+            <h2 class="citilink-brand-color" style="margin: 0;">Citilink</h2>
+            <div style="display: flex; gap: 5px;">
+                <button id="citilinkExportBtn" class="citilink-btn" style="padding: 5px 10px; font-size: 11px;">Excel</button>
+                <button id="citilinkClearBtn" style="padding: 5px 10px; font-size: 11px; background-color: #6c757d;">Очистить</button>
+            </div>
+        </div>
+
+        <div class="form-group">
+            <textarea id="citilinkArticles" placeholder="Коды товаров Citilink (через пробел, запятую или с новой строки)
+Пример:
+2160826
+2143912" rows="6"></textarea>
+        </div>
+
+        <button id="citilinkStartBtn" class="citilink-btn">Собрать и обработать</button>
+
+        <div id="citilinkProgressContainer" style="display: none; margin-top: 15px;">
+            <div style="display: flex; justify-content: space-between; font-size: 11px; margin-bottom: 4px;">
+                <span id="citilinkProgressText">Обработано: 0 из 0</span>
+                <span id="citilinkProgressPercent">0%</span>
+            </div>
+            <div class="citilink-progress-track">
+                <div id="citilinkProgressBar" class="citilink-progress-bar"></div>
+            </div>
+        </div>
+
+        <div class="citilink-table-header">
+            <span>Артикул</span>
+            <span>Бренд</span>
+            <span>Фото</span>
+            <span>Статус</span>
+        </div>
+        <div id="citilinkResultsList" class="citilink-results-list">
+            <!-- Citilink results will be injected here -->
+        </div>
+    </div>
+
+    <div class="container tab-content" id="reviews-tab">
+        <h2>Ответы на отзывы</h2>
+        
+        <!-- Delay Settings -->
+        <div class="settings-box">
+            <label class="checkbox-container">
+                <input type="checkbox" id="delayEnabled">
+                Включить задержку
+            </label>
+            <div id="delayInputsContainer" class="delay-inputs" style="display: none; align-items: center; gap: 5px; margin-top: 8px;">
+                <input type="number" id="minDelay" placeholder="мин" min="1" value="2" style="width: 60px; padding: 6px; border: 1px solid #ddd; border-radius: 4px;">
+                <span>-</span>
+                <input type="number" id="maxDelay" placeholder="макс" min="1" value="5" style="width: 60px; padding: 6px; border: 1px solid #ddd; border-radius: 4px;">
+                <span>сек</span>
+            </div>
+        </div>
+
+        <!-- Template Form -->
+        <div class="template-form">
+            <h3 id="formTitle" style="font-size: 14px; margin: 5px 0 10px 0; color: #333;">Новый шаблон</h3>
+            <input type="hidden" id="templateId">
+            <div class="form-group" style="margin-bottom: 8px;">
+                <input type="text" id="templateTitle" placeholder="Название шаблона (например, Спасибо)" required style="padding: 8px; border: 1px solid #ddd; border-radius: 6px; font-size: 13px;">
+            </div>
+            <div class="form-group" style="margin-bottom: 8px;">
+                <textarea id="templateText" placeholder="Текст автоответа..." rows="4" required style="width: 100%; box-sizing: border-box;"></textarea>
+            </div>
+            <div style="display: flex; gap: 8px;">
+                <button id="saveTemplateBtn" style="flex-grow: 1; padding: 8px; font-size: 13px;">Сохранить</button>
+                <button id="cancelTemplateBtn" style="flex-grow: 1; padding: 8px; font-size: 13px; background-color: #6c757d; display: none;">Отмена</button>
+            </div>
+        </div>
+
+        <!-- Templates List -->
+        <div class="tracked-items-header">
+            <h3>Сохранённые шаблоны</h3>
+        </div>
+        <div id="templatesList" style="max-height: 200px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px;">
+            <!-- Templates will be injected here -->
+        </div>
+    </div>
+
+    <div class="container tab-content" id="ai-questions-tab">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+            <h2 style="margin: 0; font-size: 16px;">Вопросы (DeepSeek)</h2>
+            <span class="ai-badge" id="deepseekStatusBadge">Проверка...</span>
+        </div>
+
+        <!-- API Key Box -->
+        <div class="settings-box ai-card">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                <label style="font-size: 12px; font-weight: 700; color: #333;">DeepSeek API Ключ</label>
+                <a href="https://platform.deepseek.com/api_keys" target="_blank" style="color: #005bff; text-decoration: none; font-size: 11px; font-weight: 600;">Получить ключ ↗</a>
+            </div>
+            <div style="display: flex; gap: 6px;">
+                <div style="position: relative; flex: 1;">
+                    <input type="password" id="deepseekApiKey" placeholder="sk-..." style="width: 100%; box-sizing: border-box; padding: 7px 30px 7px 8px; font-family: monospace; font-size: 12px; border: 1px solid #ddd; border-radius: 6px;">
+                    <button type="button" id="toggleApiKeyVisibility" style="position: absolute; right: 4px; top: 50%; transform: translateY(-50%); background: none; border: none; padding: 4px; color: #777; cursor: pointer; font-size: 13px;">👁️</button>
+                </div>
+                <button id="saveDeepSeekKeyBtn" style="padding: 7px 12px; font-size: 12px; white-space: nowrap; border-radius: 6px;">Проверить</button>
+            </div>
+            <div id="deepseekKeyStatusMsg" style="font-size: 11px; margin-top: 5px; min-height: 15px;"></div>
+        </div>
+
+        <!-- Balance & Stats Dashboard -->
+        <div class="settings-box ai-card" id="deepseekDashboard">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                <span style="font-size: 12px; font-weight: 700; color: #222;">Дашборд баланса & расхода</span>
+                <button id="refreshBalanceBtn" title="Обновить баланс" style="background: #fff; border: 1px solid #cfe0ff; border-radius: 4px; padding: 3px 8px; font-size: 11px; color: #005bff; cursor: pointer; font-weight: 600;">🔄 Обновить</button>
+            </div>
+            <div class="ai-balance-widget">
+                <div class="ai-balance-main">
+                    <span class="ai-balance-label">Остаток на балансе:</span>
+                    <span class="ai-balance-value" id="deepseekBalanceValue">—</span>
+                </div>
+                <div class="ai-balance-sub" id="deepseekBalanceRub">Баланс еще не проверен</div>
+            </div>
+            <div class="ai-stats-grid">
+                <div class="ai-stat-box">
+                    <div class="ai-stat-num" id="deepseekStatRequests">0</div>
+                    <div class="ai-stat-label">Ответов</div>
+                </div>
+                <div class="ai-stat-box">
+                    <div class="ai-stat-num" id="deepseekStatTokens">0</div>
+                    <div class="ai-stat-label">Токенов</div>
+                </div>
+                <div class="ai-stat-box">
+                    <div class="ai-stat-num" id="deepseekStatCost">$0.00</div>
+                    <div class="ai-stat-label">Расход</div>
+                </div>
+            </div>
+            <div style="display: flex; justify-content: flex-end; margin-top: 8px;">
+                <button id="resetStatsBtn" style="background: none; border: none; color: #888; font-size: 11px; cursor: pointer; text-decoration: underline; padding: 0;">Сбросить статистику</button>
+            </div>
+        </div>
+
+        <!-- Main System Prompt -->
+        <div class="settings-box ai-card">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                <label style="font-size: 12px; font-weight: 700; color: #222;">Промпт ответов на вопросы</label>
+                <button id="resetPromptBtn" style="background: none; border: none; color: #005bff; font-size: 11px; cursor: pointer; font-weight: 600; padding: 0;">Сброс</button>
+            </div>
+            <div style="font-size: 11px; color: #666; margin-bottom: 6px;">Определяет роль, поведение и правила формулировки ответов:</div>
+            <textarea id="deepseekSystemPrompt" rows="6" placeholder="Текст системного промпта..." style="width: 100%; box-sizing: border-box; font-size: 12px; line-height: 1.4; resize: vertical; border: 1px solid #ddd; border-radius: 6px; padding: 8px;"></textarea>
+            <div style="display: flex; gap: 4px; flex-wrap: wrap; margin-top: 6px; align-items: center;">
+                <span style="font-size: 10px; color: #888;">Вставить тег:</span>
+                <button type="button" class="prompt-chip" data-chip="{product}">{product}</button>
+                <button type="button" class="prompt-chip" data-chip="{brand}">{brand}</button>
+                <button type="button" class="prompt-chip" data-chip="{sku}">{sku}</button>
+                <button type="button" class="prompt-chip" data-chip="{question}">{question}</button>
+                <button type="button" class="prompt-chip" data-chip="{buyer}">{buyer}</button>
+            </div>
+        </div>
+
+        <!-- Review Reply Prompt -->
+        <div class="settings-box ai-card">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                <label style="font-size: 12px; font-weight: 700; color: #222;">Промпт ответов на отзывы</label>
+                <button id="resetReviewPromptBtn" style="background: none; border: none; color: #005bff; font-size: 11px; cursor: pointer; font-weight: 600; padding: 0;">Сброс</button>
+            </div>
+            <div style="font-size: 11px; color: #666; margin-bottom: 6px;">Используется в таблице отзывов, когда выбран режим «✨ DeepSeek AI»:</div>
+            <textarea id="deepseekReviewPrompt" rows="6" placeholder="Промпт для ответов на отзывы..." style="width: 100%; box-sizing: border-box; font-size: 12px; line-height: 1.4; resize: vertical; border: 1px solid #ddd; border-radius: 6px; padding: 8px;"></textarea>
+            <div style="display: flex; gap: 4px; flex-wrap: wrap; margin-top: 6px; align-items: center;">
+                <span style="font-size: 10px; color: #888;">Вставить тег:</span>
+                <button type="button" class="prompt-chip" data-target="review" data-chip="{product}">{product}</button>
+                <button type="button" class="prompt-chip" data-target="review" data-chip="{review}">{review}</button>
+                <button type="button" class="prompt-chip" data-target="review" data-chip="{date}">{date}</button>
+            </div>
+        </div>
+
+        <!-- Citilink / Avito Prompt -->
+        <div class="settings-box ai-card">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                <label style="font-size: 12px; font-weight: 700; color: #222;">Промпт описания Citilink для Avito</label>
+                <button id="resetCitilinkPromptBtn" style="background: none; border: none; color: #005bff; font-size: 11px; cursor: pointer; font-weight: 600; padding: 0;">Сброс</button>
+            </div>
+            <div style="font-size: 11px; color: #666; margin-bottom: 6px;">Получает данные товара и формирует текст объявления без выдуманных характеристик:</div>
+            <textarea id="deepseekCitilinkPrompt" rows="8" placeholder="Промпт для описания товара Citilink..." style="width: 100%; box-sizing: border-box; font-size: 12px; line-height: 1.4; resize: vertical; border: 1px solid #ddd; border-radius: 6px; padding: 8px;"></textarea>
+            <div style="display: flex; gap: 4px; flex-wrap: wrap; margin-top: 6px; align-items: center;">
+                <span style="font-size: 10px; color: #888;">Вставить тег:</span>
+                <button type="button" class="prompt-chip" data-target="citilink" data-chip="{article}">{article}</button>
+                <button type="button" class="prompt-chip" data-target="citilink" data-chip="{name}">{name}</button>
+                <button type="button" class="prompt-chip" data-target="citilink" data-chip="{brand}">{brand}</button>
+                <button type="button" class="prompt-chip" data-target="citilink" data-chip="{description}">{description}</button>
+                <button type="button" class="prompt-chip" data-target="citilink" data-chip="{characteristics}">{characteristics}</button>
+            </div>
+        </div>
+
+        <!-- Assistant Options -->
+        <div class="settings-box ai-card">
+            <label style="font-size: 12px; font-weight: 700; color: #222; margin-bottom: 8px; display: block;">Параметры автоответов</label>
+            <div style="display: flex; flex-direction: column; gap: 8px;">
+                <label class="checkbox-container" style="font-size: 12px;">
+                    <input type="checkbox" id="deepseekAutoSend">
+                    Сразу нажимать «Отправить ответ»
+                </label>
+                <div style="display: flex; justify-content: space-between; align-items: center; font-size: 12px;">
+                    <span>Модель:</span>
+                    <select id="deepseekModelSelect" style="padding: 4px 8px; border-radius: 4px; border: 1px solid #ddd; font-size: 12px; max-width: 190px;">
+                        <option value="deepseek-flash" selected>DeepSeek V4.1 Flash</option>
+                        <option value="deepseek-v4-pro">DeepSeek V4 Pro</option>
+                        <option value="deepseek-v3">deepseek-v3 (Direct V3)</option>
+                        <option value="deepseek-coder">deepseek-coder (Coder)</option>
+                        <option value="deepseek-v2.5">deepseek-v2.5 (Legacy)</option>
+                        <option value="custom">✏️ Своя модель (указать вручную)</option>
+                    </select>
+                </div>
+                <div id="deepseekCustomModelContainer" style="display: none; justify-content: space-between; align-items: center; font-size: 12px;">
+                    <span>ID модели:</span>
+                    <input type="text" id="deepseekCustomModelInput" placeholder="например, deepseek-v4" style="width: 180px; padding: 4px 6px; border-radius: 4px; border: 1px solid #ddd; font-size: 12px;">
+                </div>
+                <div style="display: flex; justify-content: space-between; align-items: center; font-size: 12px;">
+                    <span>Задержка между вопросами:</span>
+                    <div style="display: flex; align-items: center; gap: 4px;">
+                        <input type="number" id="deepseekDelay" min="1" max="60" value="3" style="width: 50px; padding: 4px; border-radius: 4px; border: 1px solid #ddd; font-size: 12px; text-align: center;">
+                        <span style="color: #666;">сек</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <button id="saveAllAiSettingsBtn" style="padding: 10px; font-size: 13px; font-weight: 700; border-radius: 6px;">Сохранить настройки AI</button>
+        <div id="aiSettingsSavedMsg" class="status-hidden" style="text-align: center; font-size: 12px; font-weight: 600;"></div>
+    </div>
+
+    <div class="container tab-content" id="history-tab">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+            <h2 style="margin: 0;">История действий</h2>
+        </div>
+
+        <div style="display: flex; gap: 8px; margin-bottom: 15px;">
+            <button id="showAllHistoryBtn" style="flex-grow: 1; display: none;">Показать все</button>
+            <button id="clearHistoryBtn" style="background-color: #dc3545; flex-grow: 1;">Очистить историю</button>
+        </div>
+
+        <div id="historyList">
+            <!-- History items will be injected here -->
+        </div>
+    </div>
+
+    <script src="xlsx.full.min.js"></script>
+    <script src="popup.js"></script>
+</body>
+</html>

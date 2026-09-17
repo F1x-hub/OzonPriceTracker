@@ -1,0 +1,110 @@
+[
+  {
+    "width": 1440,
+    "scrollWidth": 1440,
+    "documentScrollWidth": 1440,
+    "viewport": 1440,
+    "price": "Ожидание",
+    "trackWidth": 998,
+    "trackClient": 998,
+    "sidebar": 232,
+    "main": 1180,
+    "overflow": []
+  },
+  {
+    "width": 1024,
+    "scrollWidth": 1024,
+    "documentScrollWidth": 1024,
+    "viewport": 1024,
+    "price": "Ожидание",
+    "trackWidth": 652,
+    "trackClient": 652,
+    "sidebar": 232,
+    "main": 792,
+    "overflow": []
+  },
+  {
+    "width": 768,
+    "scrollWidth": 768,
+    "documentScrollWidth": 768,
+    "viewport": 768,
+    "price": "Ожидание",
+    "trackWidth": 694,
+    "trackClient": 694,
+    "sidebar": 768,
+    "main": 768,
+    "overflow": []
+  },
+  {
+    "width": 390,
+    "scrollWidth": 390,
+    "documentScrollWidth": 390,
+    "viewport": 390,
+    "price": "Ожидание",
+    "trackWidth": 316,
+    "trackClient": 316,
+    "sidebar": 390,
+    "main": 390,
+    "overflow": [
+      {
+        "tag": "A",
+        "id": "",
+        "className": "",
+        "right": 620.140625,
+        "width": 86.125,
+        "display": "flex"
+      },
+      {
+        "tag": "A",
+        "id": "",
+        "className": "",
+        "right": 530.015625,
+        "width": 71.828125,
+        "display": "flex"
+      },
+      {
+        "tag": "A",
+        "id": "",
+        "className": "",
+        "right": 454.1875,
+        "width": 70.6875,
+        "display": "flex"
+      }
+    ]
+  },
+  {
+    "customHidden": "",
+    "customVisible": false,
+    "deepseekModelOptions": [
+      "DeepSeek V4.1 Flash",
+      "DeepSeek V4 Pro",
+      "Своя модель"
+    ],
+    "deepseekThinking": "disabled",
+    "deepseekBalance": "12,34 USD",
+    "deepseekRequests": "7",
+    "deepseekTokens": "2 000",
+    "deepseekCost": "¥0.123"
+  },
+  {
+    "balanceCheckNote": "Баланс обновлён.",
+    "balanceAfterCheck": "12,34 USD"
+  },
+  {
+    "settingsMobileScrollWidth": 390,
+    "settingsMobileBalance": "12,34 USD",
+    "settingsMobileButtonWidth": 312
+  },
+  {
+    "collectionVisible": true,
+    "wbInputVisible": true,
+    "citilinkInputVisible": true,
+    "errorResponseUi": "AUDIT simulated failure",
+    "inputAfterError": "12345"
+  },
+  {
+    "popupHeight": 650,
+    "quickVisible": false,
+    "manualVisible": true
+  }
+]

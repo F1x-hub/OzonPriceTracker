@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MarketPilot</title>
+  <link rel="icon" href="assets/marketpilot-mark.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="popup_compact.css">
+</head>
+<body>
+  <main class="popup" aria-labelledby="popup-title">
+    <header class="popup-header">
+      <img class="brand-mark" src="assets/marketpilot-mark.svg" alt="" aria-hidden="true">
+      <div>
+        <p class="eyebrow">MarketPilot</p>
+        <h1 id="popup-title">Быстрое действие</h1>
+      </div>
+      <button class="icon-button" id="settingsButton" type="button" aria-label="Открыть настройки" title="Настройки">⚙</button>
+    </header>
+
+    <section class="context-card" id="contextCard" aria-live="polite">
+      <div class="context-topline"><span class="status-dot" id="statusDot"></span><span id="contextMarketplace">Определяем страницу…</span></div>
+      <h2 id="contextTitle">Загрузка</h2>
+      <p id="contextDescription">Проверяю текущую вкладку.</p>
+    </section>
+
+    <form class="quick-form" id="quickForm" hidden>
+      <div class="form-heading"><h2>Отслеживание цены</h2><p>Получите уведомление, когда цена достигнет цели.</p></div>
+      <label for="targetPrice">Целевая цена</label>
+      <div class="price-input">
+        <input id="targetPrice" type="number" min="1" step="1" inputmode="numeric" placeholder="Например, 2 000" aria-describedby="feedback" required>
+        <span aria-hidden="true">₽</span>
+      </div>
+      <fieldset>
+        <legend>Учитывать цену</legend>
+        <label><input type="radio" name="priceType" value="bank" checked> С Ozon Банком</label>
+        <label><input type="radio" name="priceType" value="nobank"> Без Ozon Банка</label>
+      </fieldset>
+      <button class="primary-button" type="submit" id="trackButton">Отслеживать товар</button>
+    </form>
+
+    <section class="action-card" id="actionCard" hidden>
+      <div class="form-heading"><h2 id="actionTitle">Доступные действия</h2><p id="actionDescription"></p></div>
+      <div class="action-list" id="actionList"></div>
+    </section>
+
+    <div class="feedback" id="feedback" role="status" aria-live="polite"></div>
+
+    <footer class="popup-footer">
+      <span id="jobStatus">Нет активных заданий</span>
+      <button class="link-button" id="dashboardButton" type="button">Открыть дашборд</button>
+    </footer>
+  </main>
+  <script type="module" src="popup_compact.js"></script>
+</body>
+</html>
